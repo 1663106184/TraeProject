@@ -36,58 +36,11 @@ def get_stock(code):
 
         now = float(data[3])
         yes = float(data[4])
-        # 处理成交量，确保不为0
-        volume = 0
-        if len(data) > 6 and data[6] and data[6] != '0' and data[6] != '':
-            try:
-                volume = int(data[6])
-            except:
-                volume = 0
-        
-        # 如果腾讯API获取不到成交量，尝试其他API
-        if volume == 0:
-            # 尝试新浪财经API
-            try:
-                sina_url = f"https://hq.sinajs.cn/list={api_code}"
-                sina_res = requests.get(sina_url, headers=headers, timeout=3)
-                sina_res.encoding = 'gbk'
-                sina_data = sina_res.text.split(',')
-                if len(sina_data) > 8 and sina_data[8] and sina_data[8] != '0':
-                    volume = int(float(sina_data[8]))
-            except:
-                pass
-        
-        # 如果新浪也不行，尝试东方财富API
-        if volume == 0:
-            try:
-                secid = f"1.{api_code}" if api_code.startswith('sh') else f"0.{api_code}"
-                eastmoney_url = f"http://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f57,f58,f62"
-                em_res = requests.get(eastmoney_url, headers=headers, timeout=3)
-                em_data = em_res.json()
-                if em_data.get('data') and em_data['data'].get('f62'):
-                    volume = int(em_data['data']['f62'])
-            except:
-                pass
-        
-        # 如果东方财富也不行，尝试获取最近K线数据来计算成交量
-        if volume == 0:
-            try:
-                kline_url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayhfq&param={api_code},day,,,2,hfq"
-                kline_res = requests.get(kline_url, headers=headers, timeout=3)
-                kline_text = kline_res.text
-                match = re.search(r'=(\{.*\})', kline_text)
-                if match:
-                    kline_data = eval(match.group(1))
-                    days = kline_data['data'].get(api_code, {}).get('hfqday', [])
-                    if len(days) >= 1:
-                        volume = int(float(days[-1][5]))
-            except:
-                pass
-        
+        volume = int(data[6]) if data[6] else 0
         zdf = (now - yes) / yes * 100
         
-        # 只在上涨且有成交量时才获取昨日成交量（减少API调用）
-        if zdf > 0 and volume > 0 and volume < 10**12:
+        # 只在上涨时才获取昨日成交量（减少API调用）
+        if zdf > 0 and volume > 0:
             yesterday_volume = 0
             volume_ratio = 0
             try:
@@ -249,11 +202,10 @@ def main():
         df_result['总市值'] = df_result['总市值'].apply(format_number)
         df_result['大单净额'] = df_result['大单净额'].apply(lambda x: f"{x}万元" if x > 0 else "0万元")
         df_result['涨跌幅'] = df_result['涨跌幅'].apply(lambda x: f"{x:.2f}%")
-        df_result['量比'] = df_result['量比'].apply(lambda x: round(x, 2) if x > 0 else 0)
-        df_result['成交量对比'] = df_result['成交量对比'].apply(lambda x: f"{float(x):+.2f}%" if abs(x) > 0.001 else "0%")
-        # 确保成交量为整数类型，不使用千分位分隔
-        df_result['成交量(手)'] = df_result['成交量(手)'].astype(int)
-        df_result['昨日成交量(手)'] = df_result['昨日成交量(手)'].astype(int)
+        df_result['量比'] = df_result['量比'].apply(lambda x: f"{x:.2f}" if x > 0 else "--")
+        df_result['成交量对比'] = df_result['成交量对比'].apply(lambda x: f"{x:+.2f}%" if x != 0 else "--")
+        df_result['成交量(手)'] = df_result['成交量(手)'].apply(lambda x: f"{x:,}" if x > 0 else "--")
+        df_result['昨日成交量(手)'] = df_result['昨日成交量(手)'].apply(lambda x: f"{x:,}" if x > 0 else "--")
 
     print(f"\n扫描完成！")
     print(f"总代码数: {len(stock_codes)}")
@@ -263,7 +215,7 @@ def main():
     print(f"耗时: {elapsed_time:.2f}秒")
 
     if not df_result.empty:
-        output_file = f"B点股票_{pd.Timestamp.now().strftime('%Y%m%d')}.csv"
+        output_file = f"B点股票_{pd.Timestamp.now().strftime('%Y%m%d')}_optimized.csv"
         df_result.to_csv(output_file, index=False, encoding='utf-8-sig')
         print(f"\n结果已保存到文件: {output_file}")
         print(f"文件包含 {len(df_result)} 只上涨股票")

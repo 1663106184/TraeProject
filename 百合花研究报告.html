@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>百合花研究报告 - 2026年5月20日</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Microsoft YaHei', sans-serif; background: #f5f7fa; }
+        .report-container { max-width: 900px; margin: 0 auto; background: white; min-height: 100vh; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .header { background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); color: white; padding: 30px; text-align: center; }
+        .header h1 { font-size: 28px; margin-bottom: 10px; }
+        .header p { opacity: 0.8; font-size: 14px; }
+        .stock-info { display: flex; justify-content: center; gap: 30px; margin-top: 20px; }
+        .stock-info span { font-size: 16px; }
+        .content { padding: 30px; }
+        .section { margin-bottom: 35px; }
+        .section-title { font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 3px solid #27ae60; position: relative; }
+        .section-title::after { content: ''; position: absolute; bottom: -3px; left: 0; width: 60px; height: 3px; background: #f39c12; }
+        .price-section { display: flex; align-items: center; gap: 30px; padding: 25px; background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-radius: 15px; margin-bottom: 25px; }
+        .price-label { font-size: 14px; color: #666; }
+        .price-value { font-size: 52px; font-weight: bold; color: #27ae60; }
+        .price-change { font-size: 22px; font-weight: bold; padding: 8px 20px; border-radius: 25px; }
+        .price-change.up { background: rgba(39,174,96,0.1); color: #27ae60; }
+        .price-change.down { background: rgba(231,76,60,0.1); color: #e74c3c; }
+        .info-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+        .info-card { background: #f8f9fa; padding: 20px; border-radius: 10px; text-align: center; }
+        .info-card .label { font-size: 12px; color: #666; margin-bottom: 8px; }
+        .info-card .value { font-size: 20px; font-weight: bold; color: #2c3e50; }
+        .info-card.negative .value { color: #e74c3c; }
+        .analysis-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+        .analysis-box { background: #f8f9fa; padding: 20px; border-radius: 10px; }
+        .analysis-box h4 { color: #2c3e50; margin-bottom: 15px; }
+        .indicator-list { list-style: none; }
+        .indicator-list li { padding: 10px 0; border-bottom: 1px dashed #ddd; display: flex; justify-content: space-between; }
+        .indicator-list li:last-child { border-bottom: none; }
+        .indicator-name { color: #666; }
+        .indicator-value { font-weight: bold; }
+        .indicator-value.up { color: #27ae60; }
+        .indicator-value.down { color: #e74c3c; }
+        .rating-section { padding: 30px; text-align: center; border-radius: 15px; margin: 25px 0; }
+        .rating-section.high { background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); }
+        .rating-section.medium { background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); }
+        .rating-section.low { background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); }
+        .rating-score { font-size: 56px; font-weight: bold; margin-bottom: 10px; }
+        .rating-section.high .rating-score, .rating-section.high .rating-text { color: #27ae60; }
+        .rating-section.medium .rating-score, .rating-section.medium .rating-text { color: #f39c12; }
+        .rating-section.low .rating-score, .rating-section.low .rating-text { color: #e74c3c; }
+        .rating-text { font-size: 20px; font-weight: bold; }
+        .advice-section { background: #e8f5e9; border-left: 5px solid #27ae60; padding: 20px; border-radius: 0 10px 10px 0; margin: 25px 0; }
+        .advice-title { font-weight: bold; color: #1e8449; margin-bottom: 10px; font-size: 16px; }
+        .advice-content { color: #7f8c8d; line-height: 1.6; }
+        .trend-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .trend-table th, .trend-table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+        .trend-table th { background: #f8f9fa; color: #666; font-weight: normal; }
+        .trend-table tr:hover { background: #f8f9fa; }
+        .footer { background: #2c3e50; color: white; text-align: center; padding: 20px; font-size: 14px; }
+        .footer p { margin-bottom: 5px; }
+        .disclaimer { background: #f8f9fa; padding: 15px; margin-top: 25px; border-radius: 10px; font-size: 12px; color: #666; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="report-container">
+        <div class="header">
+            <h1>📊 百合花 (603823) 研究报告</h1>
+            <p>专业股票分析报告 | 基于MACD趋势共振模型</p>
+            <div class="stock-info">
+                <span>📅 分析日期：2026年5月20日</span>
+                <span>📍 股票代码：603823.SH</span>
+                <span>📈 所属行业：化学制品</span>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="section">
+                <div class="section-title">一、实时行情</div>
+                <div class="price-section">
+                    <div>
+                        <div class="price-label">最新价</div>
+                        <div class="price-value">23.26</div>
+                    </div>
+                    <div>
+                        <div class="price-label">涨跌幅</div>
+                        <div class="price-change up">+1.17</div>
+                    </div>
+                </div>
+                
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="label">昨日收盘</div>
+                        <div class="value">22.99</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">今日涨跌</div>
+                        <div class="value up" style="color: #27ae60;">+0.27</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">MA5</div>
+                        <div class="value">37.78</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">MA60</div>
+                        <div class="value">32.95</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">二、趋势分析</div>
+                <div class="analysis-grid">
+                    <div class="analysis-box">
+                        <h4>📈 均线系统</h4>
+                        <ul class="indicator-list">
+                            <li><span class="indicator-name">MA5</span><span class="indicator-value up">37.78</span></li>
+                            <li><span class="indicator-name">MA10</span><span class="indicator-value up">36.84</span></li>
+                            <li><span class="indicator-name">MA20</span><span class="indicator-value up">34.6</span></li>
+                            <li><span class="indicator-name">MA60</span><span class="indicator-value down">32.95</span></li>
+                        </ul>
+                    </div>
+                    <div class="analysis-box">
+                        <h4>📊 MACD指标</h4>
+                        <ul class="indicator-list">
+                            <li><span class="indicator-name">DIF</span><span class="indicator-value down">1.2264</span></li>
+                            <li><span class="indicator-name">DEA</span><span class="indicator-value">1.4586</span></li>
+                            <li><span class="indicator-name">柱状图</span><span class="indicator-value down">-0.4644</span></li>
+                            <li><span class="indicator-name">状态</span><span class="indicator-value down">死叉区域</span></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="trend-table">
+                    <tr>
+                        <th>指标</th>
+                        <th>数值</th>
+                        <th>状态</th>
+                        <th>解读</th>
+                    </tr>
+                    <tr>
+                        <td>60日线方向</td>
+                        <td>32.95</td>
+                        <td><span style="color: #e74c3c;">向下</span></td>
+                        <td>长期趋势走弱</td>
+                    </tr>
+                    <tr>
+                        <td>股价相对60日线</td>
+                        <td>-28.25%</td>
+                        <td><span style="color: #e74c3c;">折价</span></td>
+                        <td>股价大幅低于均线</td>
+                    </tr>
+                    <tr>
+                        <td>均线结构</td>
+                        <td>向上</td>
+                        <td><span style="color: #27ae60;">向上</span></td>
+                        <td>短期均线多头</td>
+                    </tr>
+                    <tr>
+                        <td>MACD位置</td>
+                        <td>0轴上方</td>
+                        <td><span style="color: #27ae60;">0轴上方</span></td>
+                        <td>多头区域</td>
+                    </tr>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">三、综合评级</div>
+                <div class="rating-section low">
+                    <div class="rating-score">50</div>
+                    <div class="rating-text">AVOID (回避)</div>
+                </div>
+                
+                <div style="display: flex; justify-content: space-around; margin-top: 20px;">
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #e74c3c;">10/40</div>
+                        <div style="font-size: 12px; color: #666;">趋势方向</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #e74c3c;">15/35</div>
+                        <div style="font-size: 12px; color: #666;">MACD动能</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #27ae60;">25/25</div>
+                        <div style="font-size: 12px; color: #666;">基本面/资金</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">四、操作建议</div>
+                <div class="advice-section">
+                    <div class="advice-title">💡 投资建议</div>
+                    <div class="advice-content">
+                        <p><strong>当前评级：AVOID</strong></p>
+                        <p>1. 趋势方向：向下</p>
+                        <p>2. MACD状态：死叉区域</p>
+                        <p>3. 入场参考：回调至MA20(34.6)附近企稳</p>
+                        <p>4. 止损位：跌破MA60(32.95)</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">五、近5日走势</div>
+                <div class="trend-table">
+                    <tr>
+                        <th>日期</th>
+                        <th>收盘价</th>
+                        <th>涨跌幅</th>
+                        <th>状态</th>
+                    </tr>
+                    <tr><td>2026-05-14</td><td>40.60</td><td><span style='color: #27ae60;'>+6.80%</span></td><td>上涨</td></tr><tr><td>2026-05-15</td><td>39.83</td><td><span style='color: #e74c3c;'>-1.88%</span></td><td>下跌</td></tr><tr><td>2026-05-18</td><td>40.52</td><td><span style='color: #27ae60;'>+1.74%</span></td><td>上涨</td></tr><tr><td>2026-05-19</td><td>44.33</td><td><span style='color: #27ae60;'>+9.39%</span></td><td>上涨</td></tr><tr><td>2026-05-20</td><td>23.64</td><td><span style='color: #e74c3c;'>-46.67%</span></td><td>下跌</td></tr>
+                </div>
+            </div>
+
+            <div class="disclaimer">
+                ⚠️ 风险提示：本报告仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。投资者应根据自身情况做出独立判断。
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>📊 百合花 (603823) 研究报告</p>
+            <p>Generated by 股票分析SKILL | 2026年5月20日</p>
+        </div>
+    </div>
+</body>
+</html>

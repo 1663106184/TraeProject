@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>红星发展研究报告 - 2026年5月20日</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Microsoft YaHei', sans-serif; background: #f5f7fa; }
+        .report-container { max-width: 900px; margin: 0 auto; background: white; min-height: 100vh; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .header { background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%); color: white; padding: 30px; text-align: center; }
+        .header h1 { font-size: 28px; margin-bottom: 10px; }
+        .header p { opacity: 0.8; font-size: 14px; }
+        .stock-info { display: flex; justify-content: center; gap: 30px; margin-top: 20px; }
+        .stock-info span { font-size: 16px; }
+        .content { padding: 30px; }
+        .section { margin-bottom: 35px; }
+        .section-title { font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 3px solid #3498db; position: relative; }
+        .section-title::after { content: ''; position: absolute; bottom: -3px; left: 0; width: 60px; height: 3px; background: #e74c3c; }
+        .price-section { display: flex; align-items: center; gap: 30px; padding: 25px; background: linear-gradient(135deg, #fff5f5 0%, #ffe0e0 100%); border-radius: 15px; margin-bottom: 25px; }
+        .price-label { font-size: 14px; color: #666; }
+        .price-value { font-size: 52px; font-weight: bold; color: #e74c3c; }
+        .price-change { font-size: 22px; font-weight: bold; color: #e74c3c; padding: 8px 20px; background: rgba(231,76,60,0.1); border-radius: 25px; }
+        .info-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+        .info-card { background: #f8f9fa; padding: 20px; border-radius: 10px; text-align: center; }
+        .info-card .label { font-size: 12px; color: #666; margin-bottom: 8px; }
+        .info-card .value { font-size: 20px; font-weight: bold; color: #2c3e50; }
+        .info-card.negative .value { color: #e74c3c; }
+        .analysis-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+        .analysis-box { background: #f8f9fa; padding: 20px; border-radius: 10px; }
+        .analysis-box h4 { color: #2c3e50; margin-bottom: 15px; }
+        .indicator-list { list-style: none; }
+        .indicator-list li { padding: 10px 0; border-bottom: 1px dashed #ddd; display: flex; justify-content: space-between; }
+        .indicator-list li:last-child { border-bottom: none; }
+        .indicator-name { color: #666; }
+        .indicator-value { font-weight: bold; }
+        .indicator-value.up { color: #27ae60; }
+        .indicator-value.down { color: #e74c3c; }
+        .rating-section { padding: 30px; text-align: center; border-radius: 15px; margin: 25px 0; }
+        .rating-section.high { background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); }
+        .rating-section.medium { background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); }
+        .rating-section.low { background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); }
+        .rating-score { font-size: 56px; font-weight: bold; margin-bottom: 10px; }
+        .rating-section.high .rating-score, .rating-section.high .rating-text { color: #27ae60; }
+        .rating-section.medium .rating-score, .rating-section.medium .rating-text { color: #f39c12; }
+        .rating-section.low .rating-score, .rating-section.low .rating-text { color: #e74c3c; }
+        .rating-text { font-size: 20px; font-weight: bold; }
+        .advice-section { background: #fff3e0; border-left: 5px solid #f39c12; padding: 20px; border-radius: 0 10px 10px 0; margin: 25px 0; }
+        .advice-title { font-weight: bold; color: #e67e22; margin-bottom: 10px; font-size: 16px; }
+        .advice-content { color: #7f8c8d; line-height: 1.6; }
+        .risk-section { background: #ffebee; border-left: 5px solid #e74c3c; padding: 20px; border-radius: 0 10px 10px 0; }
+        .risk-title { font-weight: bold; color: #c0392b; margin-bottom: 10px; font-size: 16px; }
+        .risk-content { color: #7f8c8d; line-height: 1.6; }
+        .trend-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .trend-table th, .trend-table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+        .trend-table th { background: #f8f9fa; color: #666; font-weight: normal; }
+        .trend-table tr:hover { background: #f8f9fa; }
+        .footer { background: #2c3e50; color: white; text-align: center; padding: 20px; font-size: 14px; }
+        .footer p { margin-bottom: 5px; }
+        .disclaimer { background: #f8f9fa; padding: 15px; margin-top: 25px; border-radius: 10px; font-size: 12px; color: #666; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="report-container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📊 红星发展 (600367) 研究报告</h1>
+            <p>专业股票分析报告 | 基于MACD趋势共振模型</p>
+            <div class="stock-info">
+                <span>📅 分析日期：2026年5月20日</span>
+                <span>📍 股票代码：600367.SH</span>
+                <span>📈 所属行业：化学原料</span>
+            </div>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+            <!-- 一、实时行情 -->
+            <div class="section">
+                <div class="section-title">一、实时行情</div>
+                <div class="price-section">
+                    <div>
+                        <div class="price-label">最新价</div>
+                        <div class="price-value">24.51</div>
+                    </div>
+                    <div>
+                        <div class="price-label">涨跌幅</div>
+                        <div class="price-change">-2.35%</div>
+                    </div>
+                </div>
+                
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="label">昨日收盘</div>
+                        <div class="value">25.10</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="label">今日开盘</div>
+                        <div class="value">25.00</div>
+                    </div>
+                    <div class="info-card negative">
+                        <div class="label">最高价</div>
+                        <div class="value">25.32</div>
+                    </div>
+                    <div class="info-card negative">
+                        <div class="label">最低价</div>
+                        <div class="value">24.40</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 二、趋势分析 -->
+            <div class="section">
+                <div class="section-title">二、趋势分析</div>
+                <div class="analysis-grid">
+                    <div class="analysis-box">
+                        <h4>📉 均线系统</h4>
+                        <ul class="indicator-list">
+                            <li><span class="indicator-name">MA5</span><span class="indicator-value down">98.75</span></li>
+                            <li><span class="indicator-name">MA10</span><span class="indicator-value down">99.35</span></li>
+                            <li><span class="indicator-name">MA20</span><span class="indicator-value down">97.13</span></li>
+                            <li><span class="indicator-name">MA60</span><span class="indicator-value down">94.82</span></li>
+                        </ul>
+                    </div>
+                    <div class="analysis-box">
+                        <h4>📊 MACD指标</h4>
+                        <ul class="indicator-list">
+                            <li><span class="indicator-name">DIF</span><span class="indicator-value down">1.13</span></li>
+                            <li><span class="indicator-name">DEA</span><span class="indicator-value">2.15</span></li>
+                            <li><span class="indicator-name">柱状图</span><span class="indicator-value down">-2.04</span></li>
+                            <li><span class="indicator-name">状态</span><span class="indicator-value down">死叉</span></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="trend-table">
+                    <tr>
+                        <th>指标</th>
+                        <th>数值</th>
+                        <th>状态</th>
+                        <th>解读</th>
+                    </tr>
+                    <tr>
+                        <td>60日线方向</td>
+                        <td>94.82</td>
+                        <td><span style="color:#e74c3c">向下</span></td>
+                        <td>长期趋势走弱</td>
+                    </tr>
+                    <tr>
+                        <td>股价相对60日线</td>
+                        <td>-19.91%</td>
+                        <td><span style="color:#e74c3c">偏离</span></td>
+                        <td>股价大幅低于均线</td>
+                    </tr>
+                    <tr>
+                        <td>均线结构</td>
+                        <td>MA5 < MA10</td>
+                        <td><span style="color:#e74c3c">空头排列</span></td>
+                        <td>短期均线空头</td>
+                    </tr>
+                    <tr>
+                        <td>MACD位置</td>
+                        <td>0轴上方</td>
+                        <td><span style="color:#27ae60">尚可</span></td>
+                        <td>多头区域但动能减弱</td>
+                    </tr>
+                </div>
+            </div>
+
+            <!-- 三、综合评级 -->
+            <div class="section">
+                <div class="section-title">三、综合评级</div>
+                <div class="rating-section low">
+                    <div class="rating-score">40</div>
+                    <div class="rating-text">AVOID (回避)</div>
+                </div>
+                
+                <div style="display: flex; justify-content: space-around; margin-top: 20px;">
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #e74c3c;">0/40</div>
+                        <div style="font-size: 12px; color: #666;">趋势方向</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #e74c3c;">15/35</div>
+                        <div style="font-size: 12px; color: #666;">MACD动能</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #27ae60;">25/25</div>
+                        <div style="font-size: 12px; color: #666;">基本面/资金</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 四、操作建议 -->
+            <div class="section">
+                <div class="section-title">四、操作建议</div>
+                <div class="advice-section">
+                    <div class="advice-title">💡 投资建议</div>
+                    <div class="advice-content">
+                        <p><strong>当前评级：回避</strong></p>
+                        <p>1. 趋势走弱：60日线持续向下，股价位于均线下方19.91%</p>
+                        <p>2. MACD死叉：DIF下穿DEA，绿柱持续放大，动能减弱</p>
+                        <p>3. 等待信号：建议等待60日线向上 + MACD金叉确认后再考虑入场</p>
+                    </div>
+                </div>
+
+                <div class="risk-section">
+                    <div class="risk-title">⚠️ 风险提示</div>
+                    <div class="risk-content">
+                        <p>⚠️ <strong>异常波动警告</strong>：数据显示5月20日股价暴跌27.53%，请确认是否为除权除息或重大公告导致。</p>
+                        <p>⚠️ <strong>趋势风险</strong>：当前处于明显下降趋势，继续下跌风险较大。</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 五、近5日走势 -->
+            <div class="section">
+                <div class="section-title">五、近5日走势</div>
+                <div class="trend-table">
+                    <tr>
+                        <th>日期</th>
+                        <th>收盘价</th>
+                        <th>涨跌幅</th>
+                        <th>状态</th>
+                    </tr>
+                    <tr>
+                        <td>2026-05-14</td>
+                        <td>100.89</td>
+                        <td><span style="color:#e74c3c">-3.00%</span></td>
+                        <td>下跌</td>
+                    </tr>
+                    <tr>
+                        <td>2026-05-15</td>
+                        <td>104.17</td>
+                        <td><span style="color:#27ae60">+3.25%</span></td>
+                        <td>反弹</td>
+                    </tr>
+                    <tr>
+                        <td>2026-05-18</td>
+                        <td>107.98</td>
+                        <td><span style="color:#27ae60">+3.65%</span></td>
+                        <td>上涨</td>
+                    </tr>
+                    <tr>
+                        <td>2026-05-19</td>
+                        <td>104.78</td>
+                        <td><span style="color:#e74c3c">-2.96%</span></td>
+                        <td>回调</td>
+                    </tr>
+                    <tr>
+                        <td>2026-05-20</td>
+                        <td>75.94</td>
+                        <td><span style="color:#e74c3c;font-weight:bold">-27.53%</span></td>
+                        <td><strong>暴跌</strong></td>
+                    </tr>
+                </div>
+            </div>
+
+            <!-- Disclaimer -->
+            <div class="disclaimer">
+                ⚠️ 风险提示：本报告仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。投资者应根据自身情况做出独立判断。
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>📊 红星发展 (600367) 研究报告</p>
+            <p>Generated by 股票分析SKILL | 2026年5月20日</p>
+        </div>
+    </div>
+</body>
+</html>
