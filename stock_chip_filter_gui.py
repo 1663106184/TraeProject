@@ -448,6 +448,13 @@ class MainWindow(QMainWindow):
             self.col_filter.addItem(header, field)
         self.col_filter.currentIndexChanged.connect(self.apply_filter)
 
+        # 板块筛选：从当前数据提取所有概念，按数量排序
+        self.sector_filter = QComboBox()
+        self.sector_filter.setFixedHeight(30)
+        self.sector_filter.addItem("全部板块", "")
+        self.sector_filter.currentIndexChanged.connect(self.apply_filter)
+        self._sector_box_ready = False   # 首次填充数据后才启用
+
         self.count_label = QLabel("共 0 只")
         self.count_label.setStyleSheet("color:#666")
 
@@ -456,8 +463,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_load_local)
         bar.addWidget(self.btn_export)
         bar.addWidget(self.btn_clear)
-        bar.addWidget(QLabel("筛选:"))
+        bar.addWidget(QLabel("列:"))
         bar.addWidget(self.col_filter, 1)
+        bar.addWidget(QLabel("板块:"))
+        bar.addWidget(self.sector_filter, 2)
         bar.addWidget(self.filter_box, 3)
         bar.addWidget(self.count_label)
         layout.addLayout(bar)
@@ -651,6 +660,7 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"扫描完成  总数 {total}  命中 {hit}  耗时 {elapsed:.1f}s", 8000
         )
+        self.populate_sector_filter()
 
     def on_error(self, msg):
         self.scanning = False
@@ -696,6 +706,19 @@ class MainWindow(QMainWindow):
                 text = self._format_value(field, val)
             else:
                 text = '' if val is None else str(val)
+
+            # 概念板块列：展示完整概念列表（、分隔），多于 4 个则附“等N个”
+            if field == '最相关概念':
+                concepts = item.get('概念列表', []) or []
+                if isinstance(concepts, str):
+                    concepts = [c.strip() for c in concepts.split(';') if c.strip()]
+                if concepts:
+                    shown = '、'.join(concepts[:4])
+                    if len(concepts) > 4:
+                        shown += f' 等{len(concepts)}个'
+                    text = shown
+                else:
+                    text = '未分类'
 
             cell = SortableTableWidgetItem(text)
             # 在每个 cell 里存完整行数据，排序后双击仍能取回正确行
@@ -761,13 +784,48 @@ class MainWindow(QMainWindow):
         return '' if val is None else str(val)
 
     # ---------- 筛选 ----------
+    def populate_sector_filter(self):
+        """从当前 all_rows 提取所有概念，按数量排序填入板块下拉。"""
+        from collections import Counter
+        cnt = Counter()
+        for r in self.all_rows:
+            concepts = r.get('概念列表', [])
+            if isinstance(concepts, str):
+                concepts = [c.strip() for c in concepts.split(';') if c.strip()]
+            for c in (concepts or []):
+                cnt[c] += 1
+        # 记住当前选中
+        cur = self.sector_filter.currentData()
+        self.sector_filter.blockSignals(True)
+        self.sector_filter.clear()
+        self.sector_filter.addItem(f"全部板块 ({len(self.all_rows)})", "")
+        for name, n in cnt.most_common():
+            self.sector_filter.addItem(f"{name} ({n})", name)
+        # 恢复选中
+        if cur:
+            idx = self.sector_filter.findData(cur)
+            if idx >= 0:
+                self.sector_filter.setCurrentIndex(idx)
+        self.sector_filter.blockSignals(False)
+        self._sector_box_ready = True
+
     def apply_filter(self, *_):
         kw = self.filter_box.text().strip().lower()
         field = self.col_filter.currentData()
+        sector = self.sector_filter.currentData() if self._sector_box_ready else ""
         shown = 0
         for row in range(self.table.rowCount()):
             match = True
-            if kw:
+            # 板块筛选：该行概念列表需含选中板块
+            if sector:
+                row_data = self.table.item(row, 0).data(Qt.UserRole + 1) if self.table.item(row, 0) else None
+                concepts = (row_data or {}).get('概念列表', []) if row_data else []
+                if isinstance(concepts, str):
+                    concepts = [c.strip() for c in concepts.split(';') if c.strip()]
+                if sector not in (concepts or []):
+                    match = False
+            # 关键词筛选
+            if match and kw:
                 if field:
                     col = next((i for i, (f, *_) in enumerate(COLUMNS) if f == field), None)
                     if col is not None:
@@ -800,6 +858,12 @@ class MainWindow(QMainWindow):
         self.local_snapshot = None
         self.local_meta = {}
         self._lock_snapshot_params(False)
+        # 清空板块下拉
+        self.sector_filter.blockSignals(True)
+        self.sector_filter.clear()
+        self.sector_filter.addItem("全部板块", "")
+        self._sector_box_ready = False
+        self.sector_filter.blockSignals(False)
         self.status.showMessage("已清空")
 
     # ---------- 本地快照筛选 ----------
@@ -850,6 +914,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.all_rows = filtered[:]
         self._append_rows(filtered)
+        self.populate_sector_filter()
         n_total = len(self.local_snapshot)
         self.count_label.setText(f"显示 {len(filtered)} / 快照 {n_total} 只")
         self.status.showMessage(

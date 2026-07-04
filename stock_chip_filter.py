@@ -140,6 +140,7 @@ def compute_features(code):
         '距筹码峰(%)': round((stock['now'] - peak_price) / peak_price * 100, 2),
         '同花顺行业': industry_info['同花顺行业'],
         '最相关概念': industry_info['最相关概念'],
+        '概念列表': industry_info['概念列表'],
     }
 
 
