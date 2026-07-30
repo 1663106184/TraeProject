@@ -1,5 +1,6 @@
 import requests
 import time
+import os
 import pandas as pd
 import re
 import json
@@ -11,6 +12,146 @@ session = requests.Session()
 session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
 
 _industry_cache = {}
+_industry_csv_cache = None  # 本地 CSV 行业数据缓存（懒加载，供无 MySQL 环境使用）
+
+# ---------------- 前十流通股东持股比例（F4）缓存 ----------------
+# 实际换手率 = 成交量 / (流通股本 × (1 - 前十流通占比))。前十比例是季度静态数据，
+# 可缓存：进程内 dict + 落盘 snapshot/freehold_cache.csv。东财 F10 接口有风控，
+# 信号量限制最多 3 个并发请求，每次间隔 ≥ 0.5s；缓存命中秒回不请求。
+# 拉不到返回 None（公司网络封东财时）。
+_freehold_cache = {}            # code -> ratio_pct (内存)
+_freehold_semaphore = threading.Semaphore(3)  # 最多3并发
+_freehold_last_call = [0.0]     # 全局节流时间戳（保证间隔≥0.5s）
+_freehold_call_lock = threading.Lock()
+_freehold_cache_lock = threading.Lock()
+FREEHOLD_CACHE_FILE = os.path.join("snapshot", "freehold_cache.csv")
+FREEHOLD_MIN_INTERVAL = 0.5     # 东财 F10 两次请求最小间隔（秒），降低到0.5配合并行
+FREEHOLD_CACHE_TTL_DAYS = 30    # 落盘缓存有效期（天），超期重拉
+
+
+def _load_freehold_cache():
+    """懒加载落盘缓存到 _freehold_cache。"""
+    global _freehold_cache
+    if _freehold_cache:
+        return
+    try:
+        if os.path.exists(FREEHOLD_CACHE_FILE):
+            df = pd.read_csv(FREEHOLD_CACHE_FILE, dtype={'code': str, 'ratio': str})
+            for _, row in df.iterrows():
+                code = str(row.get('code') or '').strip()
+                ratio = row.get('ratio')
+                if code and ratio not in (None, '', 'nan'):
+                    try:
+                        _freehold_cache[code] = float(ratio)
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+
+
+def _save_freehold_cache():
+    """把内存缓存写回落盘 CSV。"""
+    try:
+        os.makedirs("snapshot", exist_ok=True)
+        df = pd.DataFrame([{'code': str(k), 'ratio': v} for k, v in _freehold_cache.items()])
+        df.to_csv(FREEHOLD_CACHE_FILE, index=False, encoding='utf-8-sig')
+    except Exception:
+        pass
+
+
+def get_freehold_ratio(code):
+    """获取前十流通股东合计持股比例(%)。
+    优先内存缓存 -> 落盘缓存 -> 东财 F10 实时拉取（信号量 3 并发，间隔≥0.5s）。
+    拉取失败/超时/被封返回 None，不抛异常。
+    """
+    _load_freehold_cache()
+    # 命中缓存直接返回
+    with _freehold_cache_lock:
+        if code in _freehold_cache:
+            return _freehold_cache[code]
+
+    secucode = f"SH{code}" if code.startswith("6") else f"SZ{code}"
+    ratio = None
+    with _freehold_semaphore:
+        with _freehold_call_lock:
+            wait = FREEHOLD_MIN_INTERVAL - (time.time() - _freehold_last_call[0])
+            if wait > 0:
+                time.sleep(wait)
+        try:
+            r = session.get(
+                "https://emweb.securities.eastmoney.com/PC_HSF10/ShareholderResearch/PageAjax",
+                params={"code": secucode},
+                headers={"Referer": "https://emweb.securities.eastmoney.com/"},
+                timeout=8,
+            )
+            with _freehold_call_lock:
+                _freehold_last_call[0] = time.time()
+            j = r.json()
+            gdrs = j.get("gdrs") or []
+            # 取最新一期有 FREEHOLD_RATIO_TOTAL 的记录
+            for g in gdrs:
+                v = g.get("FREEHOLD_RATIO_TOTAL")
+                if v not in (None, "", 0):
+                    ratio = float(v)
+                    break
+        except Exception:
+            with _freehold_call_lock:
+                _freehold_last_call[0] = time.time()
+            ratio = None
+
+    if ratio is not None:
+        with _freehold_cache_lock:
+            _freehold_cache[code] = ratio
+        _save_freehold_cache()   # 拉到即落盘，避免崩溃丢
+    return ratio
+
+
+def get_freehold_ratio_cached(code):
+    """只查缓存（内存+落盘），不发网络请求。命中返回比例，未命中返回 None。
+    供扫描主流程用：不阻塞，未命中的票由后台异步拉取补全。
+    """
+    _load_freehold_cache()
+    return _freehold_cache.get(code)
+
+
+
+def calc_real_turnover(volume_hand, price, float_mcap_yi, freehold_ratio_pct):
+    """计算实际换手率(%)。
+    volume_hand: 当日成交量(手)
+    price: 现价
+    float_mcap_yi: 流通市值(亿元)
+    freehold_ratio_pct: 前十流通股东合计持股比例(%)，None 时返回 None
+    返回实际换手率(%) 或 None。
+    """
+    if not volume_hand or not price or not float_mcap_yi or freehold_ratio_pct is None:
+        return None
+    try:
+        float_shares = float(float_mcap_yi) * 1e8 / float(price)        # 流通股本(股)
+        real_shares = float_shares * (1 - float(freehold_ratio_pct) / 100)  # 实际流通股本(股)
+        if real_shares <= 0:
+            return None
+        vol_shares = float(volume_hand) * 100                          # 手->股
+        return round(vol_shares / real_shares * 100, 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def calc_real_turnover_from_api(api_turnover_pct, freehold_ratio_pct):
+    """用接口换手率反算实际换手率(%)。
+    接口换手率 = 成交量/流通股本；实际换手率 = 成交量/实际流通股本
+              = 接口换手率 / (1 - 前十流通占比)。
+    供后台 F4 补全用（只需接口换手率 + F4 比例，不依赖成交量/市值）。
+    """
+    if not api_turnover_pct or freehold_ratio_pct is None:
+        return None
+    try:
+        denom = 1 - float(freehold_ratio_pct) / 100
+        if denom <= 0:
+            return None
+        return round(float(api_turnover_pct) / denom, 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
 
 # API 调用参数
 API_TIMEOUT = 4          # 单次请求超时（秒），原 2s 过短易误判失败
@@ -62,6 +203,50 @@ def get_mysql_connection():
     except Exception:
         return None
 
+def _load_industry_csv():
+    """懒加载本地 stock_industry.csv（随 exe 打包分发，对方无 MySQL 时用）。
+    返回 dict: code -> (industry, sector, concepts)。加载失败返回 None。
+    """
+    global _industry_csv_cache
+    if _industry_csv_cache is not None:
+        return _industry_csv_cache
+    _industry_csv_cache = {}  # 标记已尝试，避免反复读盘
+    try:
+        import csv, os
+        # 1) PyInstaller 打包后资源在 sys._MEIPASS；2) 源码运行用当前目录
+        path = None
+        try:
+            from sys import _MEIPASS  # 打包后才存在
+            cand = os.path.join(_MEIPASS, 'stock_industry.csv')
+            if os.path.exists(cand):
+                path = cand
+        except Exception:
+            pass
+        if not path:
+            # 依次尝试当前工作目录、本文件所在目录
+            for d in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+                cand = os.path.join(d, 'stock_industry.csv')
+                if os.path.exists(cand):
+                    path = cand
+                    break
+        if not path:
+            return None
+        with open(path, encoding='utf-8-sig') as f:
+            r = csv.DictReader(f)
+            for row in r:
+                code = (row.get('code') or '').strip()
+                if not code:
+                    continue
+                _industry_csv_cache[code] = (
+                    row.get('industry') or '',
+                    row.get('sector') or '',
+                    row.get('concepts') or '',
+                )
+    except Exception:
+        _industry_csv_cache = {}
+    return _industry_csv_cache
+
+
 def get_stock_industry(code):
     global _industry_cache
 
@@ -79,36 +264,42 @@ def get_stock_industry(code):
         '概念列表': []
     }
 
-    conn = get_mysql_connection()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT industry, sector, concepts FROM stock_industry WHERE code = %s",
-                (code,)
-            )
-            row = cursor.fetchone()
-            if row:
-                industry = row[0] or ''
-                # 行业有效则采用；空或「未分类」则保留市场板块兜底
-                if industry and industry != '未分类':
-                    result['同花顺行业'] = industry
-                else:
-                    result['同花顺行业'] = f'未分类({market_sector})'
-                # 板块：优先用表里的 sector，否则用市场板块
-                result['同花顺板块'] = row[1] or market_sector
-                concepts = row[2] or ''
-                if concepts:
-                    # 概念用 ';' 分隔存储，清洗空值
-                    concept_list = [c.strip() for c in concepts.split(';') if c.strip()]
-                    result['概念列表'] = concept_list
-                    result['最相关概念'] = concept_list[0] if concept_list else '未分类'
-                    result['所属概念数量'] = len(concept_list)
-            cursor.close()
-        except Exception:
-            pass
-        finally:
-            conn.close()
+    # 优先读本地 CSV（随 exe 分发，对方无 MySQL 也能用）；读不到再连 MySQL
+    row = None
+    csv_data = _load_industry_csv()
+    if csv_data and code in csv_data:
+        row = csv_data[code]  # (industry, sector, concepts)
+    else:
+        conn = get_mysql_connection()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT industry, sector, concepts FROM stock_industry WHERE code = %s",
+                    (code,)
+                )
+                row = cursor.fetchone()
+            except Exception:
+                row = None
+            finally:
+                conn.close()
+
+    if row:
+        industry = row[0] or ''
+        # 行业有效则采用；空或「未分类」则保留市场板块兜底
+        if industry and industry != '未分类':
+            result['同花顺行业'] = industry
+        else:
+            result['同花顺行业'] = f'未分类({market_sector})'
+        # 板块：优先用表里的 sector，否则用市场板块
+        result['同花顺板块'] = row[1] or market_sector
+        concepts = row[2] or ''
+        if concepts:
+            # 概念用 ';' 分隔存储，清洗空值
+            concept_list = [c.strip() for c in concepts.split(';') if c.strip()]
+            result['概念列表'] = concept_list
+            result['最相关概念'] = concept_list[0] if concept_list else '未分类'
+            result['所属概念数量'] = len(concept_list)
 
     _industry_cache[code] = result
     return result
@@ -174,6 +365,15 @@ def get_stock_raw(code):
         total = bid_vol + ask_vol
         weibi = round((bid_vol - ask_vol) / total * 100, 2) if total > 0 else 0.0
 
+        # 流通市值(data[44],亿元) + 总市值(data[45],亿元)；实际换手率按流通股本算
+        circ_mc = float(data[44]) * 10**8 if len(data) > 44 and data[44] else 0.0
+        total_mc = float(data[45]) * 10**8 if len(data) > 45 and data[45] else 0.0
+        # 实际换手率 = 当日成交量(股) / 流通股本(股) * 100
+        turnover_real = 0.0
+        if circ_mc > 0 and now > 0 and volume > 0:
+            circ_shares = circ_mc / now
+            turnover_real = (volume * 100) / circ_shares * 100  # volume 是手，×100 转股
+
         return {
             "code": code,
             "name": data[1],
@@ -191,7 +391,9 @@ def get_stock_raw(code):
             "high": float(data[33]) if len(data) > 33 and data[33] else now,
             "low": float(data[34]) if len(data) > 34 and data[34] else now,
             "turnover": float(data[38]) if len(data) > 38 and data[38] else 0,
-            "market_cap": float(data[45]) * 10**8 if len(data) > 45 and data[45] else 0,
+            "turnover_real": round(turnover_real, 3),
+            "market_cap": total_mc,
+            "circ_market_cap": circ_mc,
             "sector": get_market_sector(code)
         }
     except Exception as e:
@@ -245,6 +447,14 @@ def get_stock(code):
         total = bid_vol + ask_vol
         weibi = round((bid_vol - ask_vol) / total * 100, 2) if total > 0 else 0.0
 
+        # 流通市值(data[44],亿元) + 总市值(data[45],亿元)；实际换手率按流通股本算
+        circ_mc = float(data[44]) * 10**8 if len(data) > 44 and data[44] else 0.0
+        total_mc = float(data[45]) * 10**8 if len(data) > 45 and data[45] else 0.0
+        turnover_real = 0.0
+        if circ_mc > 0 and now > 0 and volume > 0:
+            circ_shares = circ_mc / now
+            turnover_real = (volume * 100) / circ_shares * 100  # volume 是手，×100 转股
+
         return {
             "code": code,
             "name": data[1],
@@ -263,8 +473,10 @@ def get_stock(code):
             "high": float(data[33]) if len(data) > 33 and data[33] else now,
             "low": float(data[34]) if len(data) > 34 and data[34] else now,
             "turnover": float(data[38]) if len(data) > 38 and data[38] else 0,
+            "turnover_real": round(turnover_real, 3),
             # data[44] 流通市值、data[45] 总市值单位均为"亿元"，转元需 *10**8
-            "market_cap": float(data[45]) * 10**8 if len(data) > 45 and data[45] else 0,
+            "market_cap": total_mc,
+            "circ_market_cap": circ_mc,
             "sector": get_market_sector(code)
         }
     except Exception as e:
@@ -459,6 +671,11 @@ def process_stock(code):
             yesterday_volume = 0
             volume_ratio = 0
 
+        # 实际换手率 = 接口换手率 / (1 - 前十流通占比)。
+        # 用腾讯 data[38] 换手率反算，避免 data[6] 成交量单位在不同板块不一致的问题。
+        freehold_ratio = get_freehold_ratio(code)
+        real_turnover = calc_real_turnover_from_api(stock['turnover'], freehold_ratio)
+
         vol_compare_pct = (stock['volume'] - yesterday_volume) / yesterday_volume * 100 if yesterday_volume > 0 else 0
         vol_status = '放量' if volume_ratio >= 1.5 else ('缩量' if volume_ratio <= 0.7 else '正常')
 
@@ -524,12 +741,14 @@ def process_stock(code):
             '量比': volume_ratio,
             '委托比': stock['weibi'],
             '换手率': stock['turnover'],
+            '换手(实)': real_turnover,
             '成交额': stock['amount'],
             '成交量(手)': stock['volume'],
             '昨日成交量(手)': yesterday_volume,
             '成交量对比': vol_compare_pct,
             '量能状态': vol_status,
             '总市值': stock['market_cap'],
+            '流通市值': stock.get('circ_market_cap', 0.0),
             '诊股综合评分': round(5.5 + (stock['zdf'] / 10), 1),
             '技术面评分': round(6.0 + (stock['zdf'] / 20), 1),
             '资金面评分': round(4.0 + (stock['zdf'] / 15), 1),

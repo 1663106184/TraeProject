@@ -18,3 +18,8 @@ snapshot/
 # OS
 Thumbs.db
 .DS_Store
+
+# Build artifacts
+build/
+dist/
+*.spec

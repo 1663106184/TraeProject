@@ -23,12 +23,18 @@ from stock_full_scan import (
     get_kline_data,
     get_stock_industry,
     format_number,
+    get_freehold_ratio,
+    get_freehold_ratio_cached,
+    calc_real_turnover,
+    calc_real_turnover_from_api,
 )
 
 # ---------------- 筛选参数 ----------------
 PROFIT_RATIO_MIN = 0.60      # 获利盘比例下限（60%）：当前价之下筹码占比 ≥ 60%
-VOLUME_RATIO_MIN = 1.3       # 放量阈值：量比 ≥ 1.3
+VOLUME_RATIO_MIN = 1.3       # 量比下限：放量阈值 ≥ 1.3
+VOLUME_RATIO_MAX = 999.0     # 量比上限：缩量阈值 ≤ 0.7（放量填大值如999）
 ZDF_MIN = -99.0              # 涨跌幅下限（%）：默认 -99，即上涨下跌都收；填 0 则只要上涨
+ZDF_MAX = 99.0               # 涨跌幅上限（%）：缩量下跌填 0 则只要下跌
 KLINE_DAYS = 120             # 取近 120 个交易日构建筹码分布
 PRICE_BINS = 200             # 价位切片数量，越大越精细
 MAX_WORKERS = 30             # 并发数
@@ -125,6 +131,15 @@ def compute_features(code):
 
     industry_info = get_stock_industry(code)
 
+    # 实际换手率 = 接口换手率 / (1 - 前十流通占比)。
+    # 用腾讯 data[38] 换手率反算，而不是用成交量手动算，
+    # 避免 data[6]（成交量）在不同板块间单位不一致的问题：
+    #  - main/SME/ChiNext: data[6] 是"手"
+    #  - STAR/科创板(688):  data[6] 是"股"
+    # 只查缓存（不阻塞），未命中的票由后台 FreeholdFiller 异步补全。
+    freehold_ratio = get_freehold_ratio_cached(code)
+    real_turnover = calc_real_turnover_from_api(stock['turnover'], freehold_ratio)
+
     return {
         '代码': code + ('.SH' if code.startswith('6') else '.SZ'),
         '名称': stock['name'],
@@ -133,7 +148,9 @@ def compute_features(code):
         '涨跌幅(%)': round(stock['zdf'], 2),
         '量比': volume_ratio,
         '换手率(%)': stock['turnover'],
+        '换手(实)(%)': real_turnover,
         '成交额': stock['amount'],
+        '流通市值': stock.get('circ_market_cap', 0.0),
         '套牢盘比例(%)': round(trapped_ratio_f * 100, 2),
         '获利盘比例(%)': round(profit_ratio_f * 100, 2),
         '筹码峰价位': round(peak_price, 2),
@@ -149,14 +166,17 @@ def process_one(code):
     feat = compute_features(code)
     if feat is None:
         return None
-    # 涨跌幅下限
-    if feat['涨跌幅(%)'] <= ZDF_MIN:
+    zdf = feat['涨跌幅(%)']
+    vol = feat['量比']
+    profit = feat['获利盘比例(%)']
+    # 涨跌幅区间
+    if zdf <= ZDF_MIN or zdf >= ZDF_MAX:
         return None
-    # 量比下限
-    if feat['量比'] < VOLUME_RATIO_MIN:
+    # 量比区间
+    if vol < VOLUME_RATIO_MIN or vol > VOLUME_RATIO_MAX:
         return None
     # 获利盘下限
-    if feat['获利盘比例(%)'] < PROFIT_RATIO_MIN * 100:
+    if profit < PROFIT_RATIO_MIN * 100:
         return None
     return feat
 
@@ -207,7 +227,7 @@ def load_snapshot():
     return rows, meta
 
 
-def filter_local(rows, profit_min, vol_ratio_min, zdf_min):
+def filter_local(rows, profit_min, vol_ratio_min, vol_ratio_max, zdf_min, zdf_max):
     """在本地指标快照上按参数筛选（纯数值比较，毫秒级）。返回符合条件的 rows。"""
     if not rows:
         return []
@@ -215,11 +235,14 @@ def filter_local(rows, profit_min, vol_ratio_min, zdf_min):
     res = []
     for r in rows:
         try:
-            if float(r.get('涨跌幅(%)', 0)) <= zdf_min:
+            zdf = float(r.get('涨跌幅(%)', 0))
+            vol = float(r.get('量比', 0))
+            profit = float(r.get('获利盘比例(%)', 0))
+            if zdf <= zdf_min or zdf >= zdf_max:
                 continue
-            if float(r.get('量比', 0)) < vol_ratio_min:
+            if vol < vol_ratio_min or vol > vol_ratio_max:
                 continue
-            if float(r.get('获利盘比例(%)', 0)) < profit_pct:
+            if profit < profit_pct:
                 continue
             res.append(r)
         except (TypeError, ValueError):

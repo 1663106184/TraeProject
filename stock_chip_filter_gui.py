@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
 
 # 复用筹码筛选逻辑（同一目录）
 import stock_chip_filter as scf
-from stock_full_scan import format_number
+from stock_full_scan import format_number, get_freehold_ratio, calc_real_turnover_from_api
 
 
 # 结果列定义：(字段名, 显示表头, 是否右对齐数值, 是否需要格式化)
@@ -34,7 +34,9 @@ COLUMNS = [
     ('涨跌幅(%)',        '涨跌幅',     True,  True),    # 加 %
     ('量比',             '量比',       True,  False),
     ('换手率(%)',        '换手率',     True,  True),    # 加 %
+    ('换手(实)(%)',      '换手(实)',   True,  True),    # 加 %
     ('成交额',           '成交额',     True,  True),    # 格式化 万/亿
+    ('流通市值',         '流通市值',   True,  True),    # 格式化 万/亿
     ('套牢盘比例(%)',    '套牢盘',     True,  False),
     ('获利盘比例(%)',    '获利盘',     True,  False),
     ('筹码峰价位',       '筹码峰',     True,  False),
@@ -42,6 +44,49 @@ COLUMNS = [
     ('同花顺行业',       '同花顺行业', False, False),
     ('最相关概念',       '概念板块',   False, False),
 ]
+
+
+class FreeholdFiller(QObject):
+    """扫描结束后台并发拉 F4（前十流通占比），拉到一只发信号，主窗口刷新对应行。
+    不阻塞扫描主流程；命中缓存的票在主流程已填，这里只处理未命中的。
+    使用线程池并发拉取，信号量限制 3 并发 + 0.5s 间隔，比串行快 3 倍。"""
+    freehold_ready = pyqtSignal(str, object)   # code, ratio
+    finished = pyqtSignal(int)
+
+    def __init__(self, codes_to_fetch, max_workers=3):
+        super().__init__()
+        self.codes = codes_to_fetch
+        self.max_workers = max_workers
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        n = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+            futures = {ex.submit(self._fetch_one, c): c for c in self.codes}
+            for fut in as_completed(futures):
+                if self._stop:
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    code, ratio = fut.result()
+                except Exception:
+                    code = futures[fut]
+                    ratio = None
+                self.freehold_ready.emit(code, ratio)
+                n += 1
+        self.finished.emit(n)
+
+    def _fetch_one(self, code):
+        try:
+            ratio = get_freehold_ratio(code)
+        except Exception:
+            ratio = None
+        return code, ratio
 
 
 class ChipScanWorker(QObject):
@@ -70,7 +115,9 @@ class ChipScanWorker(QObject):
             if self.mode == "filter":
                 scf.PROFIT_RATIO_MIN = self.params['profit_min']
                 scf.VOLUME_RATIO_MIN = self.params['vol_ratio_min']
+                scf.VOLUME_RATIO_MAX = self.params.get('vol_ratio_max', 999.0)
                 scf.ZDF_MIN = self.params['zdf_min']
+                scf.ZDF_MAX = self.params.get('zdf_max', 99.0)
 
             codes = scf.generate_stock_codes()
             total = len(codes)
@@ -355,6 +402,9 @@ class MainWindow(QMainWindow):
         self.local_snapshot = None      # list of dict（指标）
         self.local_meta = {}            # 快照元信息 saved_at/kline_days/bins
         self.scan_mode = "filter"       # "filter"=扫描过滤显示 ; "snapshot"=扫描存快照
+        # F4 后台填充线程
+        self.filler = None
+        self.filler_thread = None
 
         self._build_ui()
 
@@ -369,9 +419,9 @@ class MainWindow(QMainWindow):
         param_group = QGroupBox("筛选参数")
         pl = QHBoxLayout(param_group)
         pl.setContentsMargins(10, 10, 10, 10)
-        pl.setSpacing(10)
+        pl.setSpacing(6)
 
-        def make_double(label, val, step=0.05, lo=0.0, hi=1.0, suffix=""):
+        def make_double(label, val, step=0.05, lo=0.0, hi=1.0, suffix="", width=70):
             box = QDoubleSpinBox()
             box.setRange(lo, hi)
             box.setSingleStep(step)
@@ -379,6 +429,7 @@ class MainWindow(QMainWindow):
             box.setValue(val)
             box.setSuffix(suffix)
             box.setFixedHeight(28)
+            box.setFixedWidth(width)
             pl.addWidget(QLabel(label))
             pl.addWidget(box)
             return box
@@ -393,15 +444,30 @@ class MainWindow(QMainWindow):
             pl.addWidget(box)
             return box
 
-        self.spin_profit = make_double("获利盘下限:", scf.PROFIT_RATIO_MIN, 0.05, 0.0, 1.0, "")
+        # 模式预设
+        pl.addWidget(QLabel("模式:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.setFixedHeight(28)
+        self.mode_combo.addItem("放量上涨", "up")
+        self.mode_combo.addItem("缩量下跌", "down")
+        self.mode_combo.addItem("自定义", "custom")
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        pl.addWidget(self.mode_combo)
+
+        self.spin_profit = make_double("获利盘≥", scf.PROFIT_RATIO_MIN, 0.05, 0.0, 1.0, "")
         self.spin_profit.setToolTip("0.60 = 60%（当前价之下筹码占比）")
-        self.spin_vol = make_double("量比下限:", scf.VOLUME_RATIO_MIN, 0.1, 0.0, 20.0, "")
-        self.spin_zdf = make_double("涨跌幅下限(%):", scf.ZDF_MIN, 0.5, -99.0, 20.0, "")
-        self.spin_zdf.setToolTip("默认 -99，即上涨下跌都收；填 0 则只要上涨")
+
+        self.spin_vol_lo = make_double("量比≥", scf.VOLUME_RATIO_MIN, 0.1, 0.0, 20.0, "", 60)
+        self.spin_vol_hi = make_double("量比≤", scf.VOLUME_RATIO_MAX, 0.1, 0.0, 999.0, "", 60)
+
+        self.spin_zdf_lo = make_double("涨跌≥%", scf.ZDF_MIN, 0.5, -99.0, 99.0, "", 60)
+        self.spin_zdf_hi = make_double("涨跌≤%", scf.ZDF_MAX, 0.5, -99.0, 99.0, "", 60)
+
         self.spin_days = make_int("K线天数:", scf.KLINE_DAYS, 30, 300, 10)
         self.spin_bins = make_int("价位切片:", scf.PRICE_BINS, 50, 1000, 50)
         # 筛选参数变化 → 本地重筛（K线天数/切片锁定，不连）
-        for box in (self.spin_profit, self.spin_vol, self.spin_zdf):
+        for box in (self.spin_profit, self.spin_vol_lo, self.spin_vol_hi,
+                     self.spin_zdf_lo, self.spin_zdf_hi):
             box.valueChanged.connect(self._on_param_changed_for_local)
 
         pl.addStretch()
@@ -455,6 +521,20 @@ class MainWindow(QMainWindow):
         self.sector_filter.currentIndexChanged.connect(self.apply_filter)
         self._sector_box_ready = False   # 首次填充数据后才启用
 
+        # 市场板块多选（主板/创业板/科创板）
+        self.cb_main_board = QCheckBox("主板")
+        self.cb_main_board.setChecked(True)
+        self.cb_main_board.setFixedHeight(28)
+        self.cb_main_board.toggled.connect(self.apply_filter)
+        self.cb_gem = QCheckBox("创业板")
+        self.cb_gem.setChecked(True)
+        self.cb_gem.setFixedHeight(28)
+        self.cb_gem.toggled.connect(self.apply_filter)
+        self.cb_star = QCheckBox("科创板")
+        self.cb_star.setChecked(True)
+        self.cb_star.setFixedHeight(28)
+        self.cb_star.toggled.connect(self.apply_filter)
+
         self.count_label = QLabel("共 0 只")
         self.count_label.setStyleSheet("color:#666")
 
@@ -465,7 +545,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_clear)
         bar.addWidget(QLabel("列:"))
         bar.addWidget(self.col_filter, 1)
-        bar.addWidget(QLabel("板块:"))
+        bar.addWidget(self.cb_main_board)
+        bar.addWidget(self.cb_gem)
+        bar.addWidget(self.cb_star)
+        bar.addWidget(QLabel("概念:"))
         bar.addWidget(self.sector_filter, 2)
         bar.addWidget(self.filter_box, 3)
         bar.addWidget(self.count_label)
@@ -495,6 +578,8 @@ class MainWindow(QMainWindow):
                 self.table.setColumnWidth(i, 130)
             elif field == '市场板块':
                 self.table.setColumnWidth(i, 90)
+            elif field == '流通市值':
+                self.table.setColumnWidth(i, 95)
             elif is_num:
                 self.table.setColumnWidth(i, 90)
             else:
@@ -557,8 +642,10 @@ class MainWindow(QMainWindow):
     def _collect_params(self):
         return {
             'profit_min': float(self.spin_profit.value()),
-            'vol_ratio_min': float(self.spin_vol.value()),
-            'zdf_min': float(self.spin_zdf.value()),
+            'vol_ratio_min': float(self.spin_vol_lo.value()),
+            'vol_ratio_max': float(self.spin_vol_hi.value()),
+            'zdf_min': float(self.spin_zdf_lo.value()),
+            'zdf_max': float(self.spin_zdf_hi.value()),
             'kline_days': int(self.spin_days.value()),
             'bins': int(self.spin_bins.value()),
         }
@@ -580,7 +667,8 @@ class MainWindow(QMainWindow):
         self.btn_scan_save.setText("停止扫描" if mode == "snapshot" else "扫描并存快照")
         self.btn_export.setEnabled(False)
         self.btn_clear.setEnabled(False)
-        for w in (self.spin_profit, self.spin_vol, self.spin_zdf, self.spin_days, self.spin_bins):
+        for w in (self.spin_profit, self.spin_vol_lo, self.spin_vol_hi,
+                   self.spin_zdf_lo, self.spin_zdf_hi, self.spin_days, self.spin_bins):
             w.setEnabled(False)
         self.progress.setValue(0)
         self.status.showMessage("正在扫描（存快照模式）…" if mode == "snapshot" else "正在扫描…")
@@ -629,7 +717,8 @@ class MainWindow(QMainWindow):
         self.btn_scan_save.setText("扫描并存快照")
         self.btn_export.setEnabled(True)
         self.btn_clear.setEnabled(True)
-        for w in (self.spin_profit, self.spin_vol, self.spin_zdf, self.spin_days, self.spin_bins):
+        for w in (self.spin_profit, self.spin_vol_lo, self.spin_vol_hi,
+                   self.spin_zdf_lo, self.spin_zdf_hi, self.spin_days, self.spin_bins):
             w.setEnabled(True)
         self.progress.setValue(100)
 
@@ -658,16 +747,80 @@ class MainWindow(QMainWindow):
             return
 
         self.status.showMessage(
-            f"扫描完成  总数 {total}  命中 {hit}  耗时 {elapsed:.1f}s", 8000
+            f"扫描完成  总数 {total}  命中 {hit}  耗时 {elapsed:.1f}s  正在后台补全换手(实)…", 8000
         )
         self.populate_sector_filter()
+        # 启动后台 F4 填充（只拉未缓存的 code）
+        self._start_freehold_filler(self.all_rows)
+
+    # ---------- F4 后台填充 ----------
+    def _start_freehold_filler(self, rows):
+        self._stop_freehold_filler()
+        codes = []
+        for r in rows:
+            if r.get('换手(实)(%)') is None:
+                codes.append(r.get('代码', '').split('.')[0])
+        if not codes:
+            return
+        self.filler_thread = QThread()
+        self.filler = FreeholdFiller(codes)
+        self.filler.moveToThread(self.filler_thread)
+        self.filler_thread.started.connect(self.filler.run)
+        self.filler.freehold_ready.connect(self._on_freehold_ready)
+        self.filler.finished.connect(self._on_freehold_finished)
+        self.filler.finished.connect(self.filler_thread.quit)
+        self.filler_thread.start()
+
+    def _stop_freehold_filler(self):
+        if self.filler is not None:
+            try: self.filler.stop()
+            except Exception: pass
+        if self.filler_thread is not None:
+            try: self.filler_thread.quit(); self.filler_thread.wait(2000)
+            except Exception: pass
+        self.filler = None
+        self.filler_thread = None
+
+    def _on_freehold_ready(self, code, ratio):
+        target = None
+        for r in self.all_rows:
+            rc = r.get('代码', '').split('.')[0]
+            if rc == code:
+                target = r; break
+        if target is None:
+            return
+        api_turn = target.get('换手率(%)')
+        target['换手(实)(%)'] = calc_real_turnover_from_api(api_turn, ratio)
+        self._refresh_row_cell(target, code)
+
+    def _on_freehold_finished(self, n):
+        self.status.showMessage(f"换手(实)后台补全完成（{n} 只）", 5000)
+
+    def _refresh_row_cell(self, target, code):
+        col = next((i for i, (f, *_) in enumerate(COLUMNS) if f == '换手(实)(%)'), None)
+        if col is None:
+            return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if not item: continue
+            rd = item.data(Qt.UserRole + 1)
+            if not rd: continue
+            if rd.get('代码', '').split('.')[0] == code:
+                val = target.get('换手(实)(%)')
+                text = '-' if (val is None or val != val) else f"{float(val):.2f}%"
+                cell = self.table.item(row, col)
+                if cell:
+                    cell.setText(text)
+                    cell.setData(Qt.UserRole, val if val is not None else 0)
+                return
 
     def on_error(self, msg):
         self.scanning = False
         self.btn_scan.setText("开始扫描")
         self.btn_export.setEnabled(True)
         self.btn_clear.setEnabled(True)
-        for w in (self.spin_profit, self.spin_vol, self.spin_zdf, self.spin_days, self.spin_bins):
+        for w in (self.spin_profit, self.spin_vol_lo, self.spin_vol_hi,
+                   self.spin_zdf_lo, self.spin_zdf_hi, self.spin_days, self.spin_bins):
             w.setEnabled(True)
         QMessageBox.critical(self, "扫描出错", msg)
         self.status.showMessage("扫描出错: " + msg)
@@ -772,10 +925,15 @@ class MainWindow(QMainWindow):
         try:
             if field == '成交额':
                 return format_number(float(val)) if val else '0'
+            if field == '流通市值':
+                return format_number(float(val)) if val else '0'
             if field == '涨跌幅(%)':
                 return f"{float(val):.2f}%" if val != '' else '0.00%'
             if field == '换手率(%)':
                 return f"{float(val):.2f}%" if val != '' else '0.00%'
+            if field == '换手(实)(%)':
+                if val is None or val == '' or val != val: return '-'
+                return f"{float(val):.2f}%"
             if field == '距筹码峰(%)':
                 f = float(val)
                 return f"{f:+.2f}%" if abs(f) > 0.001 else "0.00%"
@@ -813,12 +971,27 @@ class MainWindow(QMainWindow):
         kw = self.filter_box.text().strip().lower()
         field = self.col_filter.currentData()
         sector = self.sector_filter.currentData() if self._sector_box_ready else ""
+        main_on = self.cb_main_board.isChecked()
+        gem_on = self.cb_gem.isChecked()
+        star_on = self.cb_star.isChecked()
         shown = 0
         for row in range(self.table.rowCount()):
             match = True
-            # 板块筛选：该行概念列表需含选中板块
-            if sector:
-                row_data = self.table.item(row, 0).data(Qt.UserRole + 1) if self.table.item(row, 0) else None
+            row_data = self.table.item(row, 0).data(Qt.UserRole + 1) if self.table.item(row, 0) else None
+            # 市场板块勾选筛选
+            if match and not (main_on and gem_on and star_on):
+                board = (row_data or {}).get('市场板块', '')
+                if board == '科创板':
+                    if not star_on:
+                        match = False
+                elif board in ('创业板',):
+                    if not gem_on:
+                        match = False
+                else:  # 沪市主板/深市主板/其他
+                    if not main_on:
+                        match = False
+            # 概念板块筛选
+            if match and sector:
                 concepts = (row_data or {}).get('概念列表', []) if row_data else []
                 if isinstance(concepts, str):
                     concepts = [c.strip() for c in concepts.split(';') if c.strip()]
@@ -846,6 +1019,7 @@ class MainWindow(QMainWindow):
 
     # ---------- 其他 ----------
     def clear_table(self):
+        self._stop_freehold_filler()
         self.table.setRowCount(0)
         self.all_rows = []
         self.count_label.setText("共 0 只")
@@ -864,6 +1038,9 @@ class MainWindow(QMainWindow):
         self.sector_filter.addItem("全部板块", "")
         self._sector_box_ready = False
         self.sector_filter.blockSignals(False)
+        self.cb_main_board.setChecked(True)
+        self.cb_gem.setChecked(True)
+        self.cb_star.setChecked(True)
         self.status.showMessage("已清空")
 
     # ---------- 本地快照筛选 ----------
@@ -896,6 +1073,27 @@ class MainWindow(QMainWindow):
         self.spin_days.setToolTip(f"K线天数{tip}")
         self.spin_bins.setToolTip(f"价位切片{tip}")
 
+    def _on_mode_changed(self):
+        """模式切换：放量上涨 / 缩量下跌 / 自定义 自动填参数。"""
+        mode = self.mode_combo.currentData()
+        # 临时断开信号避免触发重复重筛
+        for box in (self.spin_vol_lo, self.spin_vol_hi, self.spin_zdf_lo, self.spin_zdf_hi):
+            box.blockSignals(True)
+        if mode == "up":
+            self.spin_vol_lo.setValue(1.3)
+            self.spin_vol_hi.setValue(999.0)
+            self.spin_zdf_lo.setValue(0.0)
+            self.spin_zdf_hi.setValue(99.0)
+        elif mode == "down":
+            self.spin_vol_lo.setValue(0.0)
+            self.spin_vol_hi.setValue(0.7)
+            self.spin_zdf_lo.setValue(-99.0)
+            self.spin_zdf_hi.setValue(0.0)
+        # 自定义：保持当前值不变
+        for box in (self.spin_vol_lo, self.spin_vol_hi, self.spin_zdf_lo, self.spin_zdf_hi):
+            box.blockSignals(False)
+        self._on_param_changed_for_local()
+
     def _on_param_changed_for_local(self):
         """参数变化时，若已有本地快照则实时重筛。"""
         if self.local_snapshot:
@@ -906,9 +1104,11 @@ class MainWindow(QMainWindow):
         if not self.local_snapshot:
             return
         profit_min = float(self.spin_profit.value())
-        vol_min = float(self.spin_vol.value())
-        zdf_min = float(self.spin_zdf.value())
-        filtered = scf.filter_local(self.local_snapshot, profit_min, vol_min, zdf_min)
+        vol_min = float(self.spin_vol_lo.value())
+        vol_max = float(self.spin_vol_hi.value())
+        zdf_min = float(self.spin_zdf_lo.value())
+        zdf_max = float(self.spin_zdf_hi.value())
+        filtered = scf.filter_local(self.local_snapshot, profit_min, vol_min, vol_max, zdf_min, zdf_max)
         # 按获利盘降序、量比降序排
         filtered.sort(key=lambda r: (float(r.get('获利盘比例(%)', 0)), float(r.get('量比', 0))), reverse=True)
         self.table.setRowCount(0)
@@ -1037,6 +1237,7 @@ class MainWindow(QMainWindow):
             if self.thread:
                 self.thread.quit()
                 self.thread.wait(3000)
+        self._stop_freehold_filler()
         event.accept()
 
 
