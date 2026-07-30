@@ -233,10 +233,8 @@ def compute_boll_features(code):
 
     # 实际换手率 = 接口换手率 / (1 - 前十流通占比)。
     # 用腾讯 data[38] 反算，避免 data[6] 成交量单位在 688 板块不一致的 bug。
-    # 只查缓存（不阻塞），未命中的票由后台异步拉取补全。
+    # 只查缓存（不阻塞扫描），未命中的票由后台 FreeholdFiller 异步补全。
     freehold_ratio = get_freehold_ratio_cached(code)
-    if freehold_ratio is None:
-        freehold_ratio = get_freehold_ratio(code)
     real_turnover = calc_real_turnover_from_api(stock['turnover'], freehold_ratio)
 
     return {
