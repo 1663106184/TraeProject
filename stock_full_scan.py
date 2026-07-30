@@ -203,6 +203,37 @@ def get_mysql_connection():
     except Exception:
         return None
 
+# MySQL 行业数据全表缓存（一次性加载，避免逐只查询反复连接）
+_mysql_industry_cache = None      # dict: code -> (industry, sector, concepts)
+_mysql_tried = False              # 是否已尝试过连 MySQL（失败则不再重试，避免每只股票都等超时）
+_mysql_lock = threading.Lock()
+
+
+def _load_industry_mysql():
+    """一次性从 MySQL 加载全部行业数据到内存。失败返回空 dict，且不再重试。"""
+    global _mysql_industry_cache, _mysql_tried
+    with _mysql_lock:
+        if _mysql_tried:
+            return _mysql_industry_cache or {}
+        _mysql_tried = True
+        _mysql_industry_cache = {}
+        conn = get_mysql_connection()
+        if not conn:
+            return {}
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT code, industry, sector, concepts FROM stock_industry")
+            for code, industry, sector, concepts in cursor.fetchall():
+                code = (code or '').strip()
+                if code:
+                    _mysql_industry_cache[code] = (industry or '', sector or '', concepts or '')
+        except Exception:
+            _mysql_industry_cache = {}
+        finally:
+            conn.close()
+        return _mysql_industry_cache
+
+
 def _load_industry_csv():
     """懒加载本地 stock_industry.csv（随 exe 打包分发，对方无 MySQL 时用）。
     返回 dict: code -> (industry, sector, concepts)。加载失败返回 None。
@@ -264,25 +295,16 @@ def get_stock_industry(code):
         '概念列表': []
     }
 
-    # 优先读本地 CSV（随 exe 分发，对方无 MySQL 也能用）；读不到再连 MySQL
+    # 优先读本地 CSV（随 exe 分发，对方无 MySQL 也能用）；读不到再查 MySQL 全表缓存
     row = None
     csv_data = _load_industry_csv()
     if csv_data and code in csv_data:
         row = csv_data[code]  # (industry, sector, concepts)
     else:
-        conn = get_mysql_connection()
-        if conn:
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT industry, sector, concepts FROM stock_industry WHERE code = %s",
-                    (code,)
-                )
-                row = cursor.fetchone()
-            except Exception:
-                row = None
-            finally:
-                conn.close()
+        # MySQL 全表已一次性载入内存；未命中则该票无行业数据，用市场板块兜底
+        mysql_data = _load_industry_mysql()
+        if code in mysql_data:
+            row = mysql_data[code]
 
     if row:
         industry = row[0] or ''
