@@ -101,6 +101,44 @@ P8_KISS_GAP_PCT = 1.0        # 吻时MA5与MA10差距≤此%（视作贴合）
 P8_SEP_GAP_PCT = 1.5         # 远离时MA5与MA10差距≥此%
 P8_MA_MID_UP = True           # MA10需上行（大趋势向上）
 
+# P9 2B底部反转（新低后快速收回，斯波朗迪核心）
+P9_DOWNTREND_DAYS = 20        # 前期下跌趋势回看天数
+P9_DOWNTREND_ZDF_MIN = -8.0   # 前期跌幅下限%（确在下跌）
+P9_BREAK_LOW_PCT = 0.5       # 跌破前低的幅度% （浅破=假突破）
+P9_RECOVER_DAYS_MAX = 3      # 收回创新低的天数内
+P9_RECOVER_PCT = 0.5          # 收回至前低之上此%
+
+# P10 缩量十字星（变盘前兆）
+P10_DOWNTREND_DAYS = 15       # 前期下跌回看
+P10_DOWNTREND_ZDF_MIN = -5.0 # 前期跌幅下限%
+P10_BODY_PCT = 0.3            # 实体/振幅 ≤ 此 视为十字星
+P10_VOL_RATIO_MAX = 0.7       # 量比 ≤ 此 视为缩量
+P10_UPPER_SHADOW_MIN = 0.5   # 上影线/实体 ≥ 此 （有试探性买盘）
+
+# P11 红三兵（三连阳递增）
+P11_ZDF_EACH_MIN = 1.0        # 每日涨幅≥此%
+P11_VOL_INC_MIN = 1.0        # 量递增（后日量/前日量≥此）
+P11_CLOSE_NEAR_HIGH_PCT = 70 # 收盘在当日振幅高位%（接近最高）
+
+# P12 早晨之星（跌+十字+大阳）
+P12_DAY1_ZDF_MIN = -2.0       # 第一日跌幅≥此%
+P12_DAY2_BODY_PCT = 0.4      # 第二日十字星实体小
+P12_DAY3_ZDF_MIN = 3.0        # 第三日大阳线涨幅≥此%
+P12_DAY3_VOL_RATIO_MIN = 1.3  # 第三日放量
+
+# P13 上升三法（大阳+3小阴不破+大阳）
+P13_DAY1_ZDF_MIN = 3.0        # 第一日大阳涨幅
+P13_MID_DAYS = 3              # 中间小阴线天数
+P13_MID_ZDF_MAX = -0.5        # 中间日跌幅（小阴）
+P13_MID_HOLD_LOW_PCT = 0.98   # 中间不破第一日低点
+P13_DAY5_ZDF_MIN = 2.0        # 第五日大阳涨幅
+
+# P14 量价齐升（持续3天价涨量增）
+P14_DAYS_MIN = 3              # 至少3天
+P14_ZDF_EACH_MIN = 0.5        # 每日涨幅≥此%
+P14_VOL_INC_MIN = 1.0         # 量递增
+P14_TOTAL_ZDF_MIN = 5.0       # 区间总涨幅≥此%
+
 
 # ============ 形态识别算法 ============
 
@@ -579,10 +617,271 @@ def detect_P8(df):
     }
 
 
+def detect_P9(df):
+    """P9 2B底部反转（新低后快速收回，斯波朗迪2B准则）"""
+    need = P9_DOWNTREND_DAYS + 5
+    if len(df) < need:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    lows = df['low'].astype(float).values
+    vols = df['volume'].astype(float).values
+
+    # 前期下跌趋势
+    pre = closes[-(P9_DOWNTREND_DAYS + 5):-5]
+    if len(pre) < 5:
+        return None
+    pre_zdf = (pre[-1] / pre[0] - 1) * 100
+    if pre_zdf > P9_DOWNTREND_ZDF_MIN:   # 跌幅不够
+        return None
+
+    # 找近5日内创新低后收回
+    for i in range(n - 2, max(n - 6, P9_DOWNTREND_DAYS - 1), -1):
+        # 前 P9_DOWNTREND_DAYS 的最低价
+        lookback_low = lows[max(0, i - P9_DOWNTREND_DAYS):i].min()
+        if lookback_low <= 0:
+            continue
+        # 当日跌破前低（浅破）
+        if lows[i] >= lookback_low * (1 - P9_BREAK_LOW_PCT / 100):
+            continue
+        # 后续 RECOVER_DAYS 内收回至前低之上
+        for j in range(i + 1, min(i + 1 + P9_RECOVER_DAYS_MAX, n)):
+            if closes[j] > lookback_low * (1 + P9_RECOVER_PCT / 100):
+                # 成交量确认：收回日放量更佳
+                v_ratio = vols[j] / vols[i] if vols[i] > 0 else 0
+                return {
+                    'pattern': 'P9',
+                    'name': '2B底部反转',
+                    'break_date': df.iloc[i]['date'],
+                    'break_low': round(float(lows[i]), 2),
+                    'recover_date': df.iloc[j]['date'],
+                    'recover_close': round(float(closes[j]), 2),
+                    'vol_ratio': round(float(v_ratio), 2),
+                    'pre_zdf': round(float(pre_zdf), 2),
+                    'score': 85 + (10 + pre_zdf) * 0.8 + v_ratio * 3,
+                }
+    return None
+
+
+def detect_P10(df):
+    """P10 缩量十字星（变盘前兆）"""
+    need = P10_DOWNTREND_DAYS + 3
+    if len(df) < need:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    opens = df['open'].astype(float).values
+    highs = df['high'].astype(float).values
+    lows = df['low'].astype(float).values
+    vols = df['volume'].astype(float).values
+    vma5 = vols[-6:-1].mean() if n >= 6 else None
+    if not vma5 or vma5 <= 0:
+        return None
+
+    # 前期下跌
+    pre = closes[-(P10_DOWNTREND_DAYS + 1):-1]
+    pre_zdf = (pre[-1] / pre[0] - 1) * 100
+    if pre_zdf > P10_DOWNTREND_ZDF_MIN:
+        return None
+
+    # 当日（最后一根）十字星
+    i = n - 1
+    body = abs(closes[i] - opens[i])
+    rng = highs[i] - lows[i]
+    if rng <= 0:
+        return None
+    body_pct = body / rng
+    if body_pct > P10_BODY_PCT:
+        return None
+    # 缩量
+    if vols[i] / vma5 > P10_VOL_RATIO_MAX:
+        return None
+    # 上影线有试探性买盘
+    upper_shadow = (highs[i] - max(closes[i], opens[i]))
+    if body > 0 and (upper_shadow / body) < P10_UPPER_SHADOW_MIN:
+        return None
+
+    return {
+        'pattern': 'P10',
+        'name': '缩量十字星',
+        'date': df.iloc[i]['date'],
+        'close': round(float(closes[i]), 2),
+        'body_pct': round(float(body_pct), 3),
+        'vol_ratio': round(float(vols[i] / vma5), 2),
+        'pre_zdf': round(float(pre_zdf), 2),
+        'score': 70 + (5 + pre_zdf) * 0.8 + (P10_VOL_RATIO_MAX - vols[i] / vma5) * 20,
+    }
+
+
+def detect_P11(df):
+    """P11 红三兵（三连阳递增+沿5日线）"""
+    if len(df) < 8:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    opens = df['open'].astype(float).values
+    highs = df['high'].astype(float).values
+    vols = df['volume'].astype(float).values
+
+    # 最后3日
+    for k in range(3):
+        i = n - 3 + k
+        zdf = (closes[i] / closes[i - 1] - 1) * 100
+        if zdf < P11_ZDF_EACH_MIN:
+            return None
+        # 阳线
+        if closes[i] <= opens[i]:
+            return None
+        # 收盘接近当日最高
+        rng = highs[i] - lows[i]
+        if rng > 0:
+            pos = (closes[i] - lows[i]) / rng * 100
+            if pos < P11_CLOSE_NEAR_HIGH_PCT:
+                return None
+        # 量递增
+        if k > 0:
+            if vols[i] < vols[i - 1] * P11_VOL_INC_MIN:
+                return None
+
+    total_zdf = (closes[-1] / closes[-4] - 1) * 100
+    return {
+        'pattern': 'P11',
+        'name': '红三兵',
+        'end_date': df.iloc[-1]['date'],
+        'total_zdf': round(float(total_zdf), 2),
+        'vol_ratio': round(float(vols[-1] / vols[-3]), 2),
+        'score': 75 + total_zdf * 1.5,
+    }
+
+
+def detect_P12(df):
+    """P12 早晨之星（跌+十字+大阳）"""
+    if len(df) < 5:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    opens = df['open'].astype(float).values
+    highs = df['high'].astype(float).values
+    lows = df['low'].astype(float).values
+    vols = df['volume'].astype(float).values
+
+    # 最后3日
+    d1, d2, d3 = n - 3, n - 2, n - 1
+    # 第一日跌
+    zdf1 = (closes[d1] / closes[d1 - 1] - 1) * 100
+    if zdf1 > P12_DAY1_ZDF_MIN:
+        return None
+    if closes[d1] >= opens[d1]:   # 阴线
+        return None
+    # 第二日十字星（小实体）
+    body2 = abs(closes[d2] - opens[d2])
+    rng2 = highs[d2] - lows[d2]
+    if rng2 <= 0 or (body2 / rng2) > P12_DAY2_BODY_PCT:
+        return None
+    # 第三日大阳
+    zdf3 = (closes[d3] / closes[d3 - 1] - 1) * 100
+    if zdf3 < P12_DAY3_ZDF_MIN:
+        return None
+    if closes[d3] <= opens[d3]:
+        return None
+    # 第三日放量
+    prev_vol = vols[d3 - 1] if vols[d3 - 1] > 0 else 1
+    if vols[d3] / prev_vol < P12_DAY3_VOL_RATIO_MIN:
+        return None
+
+    return {
+        'pattern': 'P12',
+        'name': '早晨之星',
+        'd1_zdf': round(float(zdf1), 2),
+        'd3_zdf': round(float(zdf3), 2),
+        'd3_vol_ratio': round(float(vols[d3] / prev_vol), 2),
+        'score': 82 + zdf3 * 1.2,
+    }
+
+
+def detect_P13(df):
+    """P13 上升三法（大阳+3小阴不破+大阳）"""
+    if len(df) < 7:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    opens = df['open'].astype(float).values
+    lows = df['low'].astype(float).values
+
+    # 取最后5日：大阳+3小阴+大阳
+    d1 = n - 5
+    # 第一日大阳
+    zdf1 = (closes[d1] / closes[d1 - 1] - 1) * 100
+    if zdf1 < P13_DAY1_ZDF_MIN or closes[d1] <= opens[d1]:
+        return None
+    d1_low = lows[d1]
+    d1_close = closes[d1]
+    # 中间3日小阴，不破第一日低点
+    for k in range(1, 1 + P13_MID_DAYS):
+        i = d1 + k
+        if closes[i] > opens[i]:   # 不是阴线
+            return None
+        zdf = (closes[i] / closes[i - 1] - 1) * 100
+        if zdf > P13_MID_ZDF_MAX:   # 跌幅不够（或上涨）视为非小阴
+            return None
+        if lows[i] < d1_low * P13_MID_HOLD_LOW_PCT:
+            return None
+    # 第五日大阳突破
+    d5 = d1 + 1 + P13_MID_DAYS
+    if d5 >= n:
+        return None
+    zdf5 = (closes[d5] / closes[d5 - 1] - 1) * 100
+    if zdf5 < P13_DAY5_ZDF_MIN or closes[d5] <= opens[d5]:
+        return None
+    if closes[d5] <= d1_close:   # 需突破第一日收盘
+        return None
+
+    return {
+        'pattern': 'P13',
+        'name': '上升三法',
+        'd1_zdf': round(float(zdf1), 2),
+        'd5_zdf': round(float(zdf5), 2),
+        'hold_low': round(float(d1_low), 2),
+        'score': 84 + zdf5 * 1.0,
+    }
+
+
+def detect_P14(df):
+    """P14 量价齐升（持续3天价涨量增）"""
+    if len(df) < P14_DAYS_MIN + 2:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    vols = df['volume'].astype(float).values
+
+    days = P14_DAYS_MIN
+    # 最后 days 天
+    for k in range(days):
+        i = n - days + k
+        zdf = (closes[i] / closes[i - 1] - 1) * 100
+        if zdf < P14_ZDF_EACH_MIN:
+            return None
+        if k > 0 and vols[i] < vols[i - 1] * P14_VOL_INC_MIN:
+            return None
+    total_zdf = (closes[-1] / closes[-days - 1] - 1) * 100
+    if total_zdf < P14_TOTAL_ZDF_MIN:
+        return None
+
+    return {
+        'pattern': 'P14',
+        'name': '量价齐升',
+        'days': days,
+        'total_zdf': round(float(total_zdf), 2),
+        'vol_ratio': round(float(vols[-1] / vols[-days]), 2),
+        'score': 76 + total_zdf * 1.2,
+    }
+
+
 # ============ 单股扫描 ============
 
 PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5,
-                     detect_P6, detect_P7, detect_P8]
+                     detect_P6, detect_P7, detect_P8, detect_P9, detect_P10,
+                     detect_P11, detect_P12, detect_P13, detect_P14]
 
 
 def scan_one(code, days=None):
