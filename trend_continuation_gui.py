@@ -63,14 +63,15 @@ class ScanThread(QThread):
 
     def run(self):
         def on_progress(d, t):
-            if self._stop:
-                raise RuntimeError('stopped')
             self.progress.emit(d, t)
+        def stop_check():
+            return self._stop
         try:
-            results = scan_market(codes=self.codes, on_progress=on_progress)
-            self.result.emit(results)
-        except RuntimeError:
-            self.finished_msg.emit('扫描已停止')
+            results = scan_market(codes=self.codes, on_progress=on_progress, stop_check=stop_check)
+            if self._stop:
+                self.finished_msg.emit('扫描已停止')
+            else:
+                self.result.emit(results)
         except Exception as e:
             self.finished_msg.emit(f'扫描出错: {e}')
 

@@ -398,8 +398,10 @@ def scan_one(code):
 
 # ============ 全市场扫描 ============
 
-def scan_market(codes=None, max_workers=MAX_WORKERS, on_progress=None):
-    """全市场扫描。codes=None 时扫全市场。"""
+def scan_market(codes=None, max_workers=MAX_WORKERS, on_progress=None, stop_check=None):
+    """全市场扫描。codes=None 时扫全市场。
+    stop_check: 无参回调，返回 True 时立即停止扫描（取消未完成任务）。
+    """
     if codes is None:
         codes = generate_stock_codes()
 
@@ -408,13 +410,23 @@ def scan_market(codes=None, max_workers=MAX_WORKERS, on_progress=None):
     done = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(scan_one, c): c for c in codes}
-        for fut in as_completed(futures):
-            done += 1
-            if on_progress:
-                on_progress(done, total)
-            r = fut.result()
-            if r:
-                results.append(r)
+        try:
+            for fut in as_completed(futures):
+                # 检查停止标志
+                if stop_check and stop_check():
+                    break
+                done += 1
+                if on_progress:
+                    on_progress(done, total)
+                r = fut.result()
+                if r:
+                    results.append(r)
+        finally:
+            # 停止时取消所有未开始的任务
+            for f in futures:
+                f.cancel()
+            # 不等剩余任务，强制关闭线程池
+            ex.shutdown(wait=False, cancel_futures=True)
     # 按最佳得分排序
     results.sort(key=lambda x: x['best_score'], reverse=True)
     return results
