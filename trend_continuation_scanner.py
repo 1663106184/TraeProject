@@ -139,6 +139,30 @@ P14_ZDF_EACH_MIN = 0.5        # 每日涨幅≥此%
 P14_VOL_INC_MIN = 1.0         # 量递增
 P14_TOTAL_ZDF_MIN = 5.0       # 区间总涨幅≥此%
 
+# P15 多头排列疏散后飞吻（强势趋势收敛-贴近-再发散）
+P15_MA_SHORT = 5
+P15_MA_MID = 10
+P15_MA_LONG = 20
+P15_BULL_DAYS_MIN = 8         # 疏散多头排列最少天数
+P15_SEP_PCT_MIN = 1.5         # 疏散期MA5与MA10差距≥此%（明显分开）
+P15_KISS_GAP_PCT = 0.8        # 飞吻贴合时差距≤此%
+P15_KISS_DAYS_MAX = 2         # 飞吻最多天数（贴合时间短=强）
+P15_SEP_AGAIN_PCT = 1.0       # 飞吻后再次发散差距≥此%
+P15_MA_UP = True              # 均线上行
+
+# P16 死叉后企稳温和放量（多头排列后MA5下穿，调整企稳再放量回升）
+P16_MA_SHORT = 5
+P16_MA_MID = 10
+P16_MA_LONG = 20
+P16_BULL_DAYS_MIN = 5         # 死叉前多头排列最少天数
+P16_ADJUST_DAYS_MIN = 5       # 调整（MA5<MA10）最少天数
+P16_ADJUST_DAYS_MAX = 20      # 调整最多天数（放宽）
+P16_SHRINK_RATIO = 0.9        # 调整期缩量（量<V_ma5×此，放宽）
+P16_SHRINK_DAYS_MIN = 3       # 调整期至少N天缩量（不必全部缩量）
+P16_RECOVER_VOL_RATIO = 1.1   # 企稳回升放量（量比≥此，放宽）
+P16_RECOVER_ZDF_MIN = 0.3     # 企稳回升涨幅≥此%（放宽）
+P16_HOLD_MA20_PCT = 0.95      # 调整不破MA20×此（放宽）
+
 
 # ============ 形态识别算法 ============
 
@@ -883,11 +907,187 @@ def detect_P14(df):
     }
 
 
+def detect_P15(df):
+    """P15 多头排列疏散后飞吻（强势趋势：疏散多头->收敛贴近->再发散）"""
+    need = P15_MA_LONG + P15_BULL_DAYS_MIN + 5
+    if len(df) < need:
+        return None
+    n = len(df)
+    ma5 = _ma_series(df, P15_MA_SHORT)
+    ma10 = _ma_series(df, P15_MA_MID)
+    ma20 = _ma_series(df, P15_MA_LONG)
+
+    # 找最近的飞吻点（MA5与MA10差距≤KISS_GAP，且≤2天）
+    # 从后往前找，放宽搜索范围到近20天
+    kiss_idx = None
+    for i in range(n - 1, max(n - 20, P15_MA_LONG - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i)
+        if None in (s, m) or m <= 0:
+            continue
+        gap = abs(s - m) / m * 100
+        if gap <= P15_KISS_GAP_PCT:
+            # 往前看连续几天小（飞吻≤2天）
+            kiss_days = 1
+            for j in range(i - 1, max(i - 5, P15_MA_LONG - 1), -1):
+                sj = _ma_at(ma5, j); mj = _ma_at(ma10, j)
+                if None in (sj, mj) or mj <= 0:
+                    break
+                if abs(sj - mj) / mj * 100 <= P15_KISS_GAP_PCT:
+                    kiss_days += 1
+                else:
+                    break
+            if kiss_days <= P15_KISS_DAYS_MAX:
+                kiss_idx = i - kiss_days + 1  # 飞吻开始日
+                break
+    if kiss_idx is None:
+        return None
+
+    # 飞吻前需有疏散多头排列（MA5>MA10>MA20，且MA5与MA10差距≥SEP_PCT）
+    # 吻点往前可能先经过收敛区（gap<SEP_PCT），再进入疏散区，需跳过收敛区
+    bull_days = 0
+    max_sep = 0
+    in_bull = False   # 是否已进入疏散多头区
+    for i in range(kiss_idx - 1, max(kiss_idx - 30, P15_MA_LONG - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i); l = _ma_at(ma20, i)
+        if None in (s, m, l):
+            break
+        if not (s > m > l):   # 不是多头排列，停
+            break
+        gap = (s - m) / m * 100
+        if gap >= P15_SEP_PCT_MIN:
+            # 进入疏散多头区
+            bull_days += 1
+            max_sep = max(max_sep, gap)
+            in_bull = True
+        else:
+            # 收敛区：如果还没进入疏散区，继续往前找；已进入则停
+            if not in_bull:
+                continue
+            else:
+                break
+    if bull_days < P15_BULL_DAYS_MIN:
+        return None
+
+    # 飞吻后再次发散（当前MA5>MA10，差距≥SEP_AGAIN）
+    s_now = _ma_at(ma5, n - 1); m_now = _ma_at(ma10, n - 1)
+    if None in (s_now, m_now) or m_now <= 0:
+        return None
+    sep_now = (s_now - m_now) / m_now * 100
+    if sep_now < P15_SEP_AGAIN_PCT:
+        return None
+
+    # 均线上行
+    ma20_now = _ma_at(ma20, n - 1); ma20_prev = _ma_at(ma20, n - 6)
+    if P15_MA_UP and (not ma20_now or not ma20_prev or ma20_now <= ma20_prev):
+        return None
+
+    return {
+        'pattern': 'P15',
+        'name': '多头疏散后飞吻',
+        'bull_days': bull_days,
+        'max_sep': round(float(max_sep), 2),
+        'kiss_date': df.iloc[kiss_idx]['date'],
+        'sep_now': round(float(sep_now), 2),
+        'ma5': round(float(s_now), 2),
+        'ma10': round(float(m_now), 2),
+        'ma20': round(float(ma20_now), 2),
+        'score': 86 + bull_days * 1.5 + sep_now * 2,
+    }
+
+
+def detect_P16(df):
+    """P16 死叉后企稳温和放量（多头排列后MA5下穿，调整企稳再放量回升）"""
+    need = P16_MA_LONG + P16_BULL_DAYS_MIN + P16_ADJUST_DAYS_MAX + 5
+    if len(df) < need:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    vols = df['volume'].astype(float).values
+    ma5 = _ma_series(df, P16_MA_SHORT)
+    ma10 = _ma_series(df, P16_MA_MID)
+    ma20 = _ma_series(df, P16_MA_LONG)
+
+    # 找最近的死叉点（MA5从上方下穿MA10）
+    death_idx = None
+    for i in range(n - 1, max(n - 25, P16_MA_LONG - 1), -1):
+        s_prev = _ma_at(ma5, i - 1); s_now = _ma_at(ma5, i)
+        m_prev = _ma_at(ma10, i - 1); m_now = _ma_at(ma10, i)
+        if None in (s_prev, s_now, m_prev, m_now):
+            continue
+        if s_prev >= m_prev and s_now < m_now:   # 死叉
+            death_idx = i
+            break
+    if death_idx is None:
+        return None
+
+    # 死叉前有多头排列（MA5>MA10>MA20）
+    bull_days = 0
+    for i in range(death_idx - 1, max(death_idx - P16_BULL_DAYS_MIN - 2, P16_MA_LONG - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i); l = _ma_at(ma20, i)
+        if None in (s, m, l):
+            break
+        if s > m > l:
+            bull_days += 1
+        else:
+            break
+    if bull_days < P16_BULL_DAYS_MIN:
+        return None
+
+    # 调整期：MA5<MA10 持续 ADJUST_DAYS_MIN~MAX 天，不破MA20
+    adj_end = n - 1
+    adj_days = 0
+    for i in range(death_idx, n):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i); l = _ma_at(ma20, i)
+        if None in (s, m, l):
+            break
+        if s < m:   # 仍死叉
+            if l > 0 and closes[i] < l * P16_HOLD_MA20_PCT:   # 破MA20
+                return None
+            adj_days += 1
+            adj_end = i
+        else:
+            break   # 重新金叉，调整结束
+    if adj_days < P16_ADJUST_DAYS_MIN or adj_days > P16_ADJUST_DAYS_MAX:
+        return None
+
+    # 调整期缩量（至少N天缩量，不必全部）
+    vma5 = vols[-(adj_days + 5):-adj_days].mean() if n >= adj_days + 5 else None
+    if not vma5 or vma5 <= 0:
+        return None
+    adj_vols = vols[death_idx:death_idx + adj_days]
+    shrink_days = sum(1 for v in adj_vols if v < vma5 * P16_SHRINK_RATIO)
+    if shrink_days < P16_SHRINK_DAYS_MIN:
+        return None
+
+    # 企稳回升：最近1-2日温和放量上涨
+    recover_idx = adj_end + 1
+    if recover_idx >= n:
+        return None
+    rec_vol_ratio = vols[recover_idx] / vma5
+    rec_zdf = (closes[recover_idx] / closes[recover_idx - 1] - 1) * 100 if recover_idx > 0 else 0
+    if rec_vol_ratio < P16_RECOVER_VOL_RATIO or rec_zdf < P16_RECOVER_ZDF_MIN:
+        return None
+
+    return {
+        'pattern': 'P16',
+        'name': '死叉后企稳温和放量',
+        'death_date': df.iloc[death_idx]['date'],
+        'bull_days': bull_days,
+        'adjust_days': adj_days,
+        'shrink_days': shrink_days,
+        'recover_date': df.iloc[recover_idx]['date'],
+        'recover_vol_ratio': round(float(rec_vol_ratio), 2),
+        'recover_zdf': round(float(rec_zdf), 2),
+        'score': 83 + bull_days + adj_days + rec_vol_ratio * 2,
+    }
+
+
 # ============ 单股扫描 ============
 
 PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5,
                      detect_P6, detect_P7, detect_P8, detect_P9, detect_P10,
-                     detect_P11, detect_P12, detect_P13, detect_P14]
+                     detect_P11, detect_P12, detect_P13, detect_P14,
+                     detect_P15, detect_P16]
 
 
 def scan_one(code, days=None):
