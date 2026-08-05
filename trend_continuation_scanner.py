@@ -602,7 +602,13 @@ def detect_P8(df):
 
     # 吻之前应该是 MA5>MA10（从上方下来吻），或 MA5<MA10（从下方上来吻后上穿）
     # 这里只要求吻之后 MA5 在 MA10 上方（向上分离）
-    kiss_type = '飞吻' if kiss_days <= 2 else '舌吻'
+    # 缠论三吻：飞吻（1-2天短暂靠近）/ 唇吻（3-4天接触）/ 湿吻（5+天缠绕）
+    if kiss_days <= 2:
+        kiss_type = '飞吻'
+    elif kiss_days <= 4:
+        kiss_type = '唇吻'
+    else:
+        kiss_type = '湿吻'
 
     return {
         'pattern': 'P8',
