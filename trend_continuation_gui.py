@@ -1,30 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-趋势中继多策略选股扫描器 - PyQt5 桌面版
-========================================
-复用 trend_continuation_scanner 的 5 种形态识别算法。
-功能：全市场扫描 / 指定股票 / 形态筛选 / 双击查看K线详情 / 导出CSV。
+趋势中继多策略选股扫描器 - PyQt5 桌面版 v2
+==========================================
+v2 修复：
+  1. 实时K线（选中行即显示，不用双击）- splitter 分栏 + 防抖定时器
+  2. 本地快照（扫描存全量特征，可离线加载筛选）
+  3. 修复闪退（异常捕获 + 线程安全）
 
 运行： py trend_continuation_gui.py
 """
 
+import os
 import sys
+import json
+import time
 from collections import Counter
 
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTableWidget, QTableWidgetItem,
     QProgressBar, QStatusBar, QHeaderView, QComboBox, QMessageBox,
-    QFileDialog, QGroupBox, QSplitter, QCheckBox, QDialog, QFrame,
+    QFileDialog, QGroupBox, QSplitter, QCheckBox, QFrame,
 )
 
 from stock_full_scan import get_kline_data, get_stock_raw, get_stock_industry
 from trend_continuation_scanner import (
-    scan_market, scan_one,
+    scan_market, scan_one, PATTERN_DETECTORS,
     KLINE_DAYS, MAX_WORKERS,
 )
 
@@ -36,6 +41,10 @@ PATTERN_INFO = {
     'P4': ('缩量回踩MA20支撑', '#a78bfa'),
     'P5': ('放量破前高后缩量回踩', '#f472b6'),
 }
+
+SNAPSHOT_DIR = "snapshot"
+SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "trend_features.csv")
+SNAPSHOT_META = os.path.join(SNAPSHOT_DIR, "trend_meta.json")
 
 
 # ============ 扫描线程 ============
@@ -66,67 +75,48 @@ class ScanThread(QThread):
             self.finished_msg.emit(f'扫描出错: {e}')
 
 
-# ============ K线详情窗 ============
-class KlineDialog(QDialog):
-    def __init__(self, code, name, parent=None):
+# ============ K线画布 ============
+class KlineCanvas(QFrame):
+    """自绘 K 线图（蜡烛+成交量+MA20+形态标注）"""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.code = code
-        self.name = name
-        self.setWindowTitle(f"{name} {code} - K线详情")
-        self.resize(900, 560)
+        self.setStyleSheet("background:#0b1220;")
+        self.setMinimumHeight(280)
         self._df = None
-        self._hits = None
-        self.init_ui()
-        self.load_data()
+        self._hits = []
+        self._info = ""
 
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        self.info_label = QLabel("加载中...")
-        self.info_label.setStyleSheet("color:#e2e8f0; background:#151c2c; padding:8px;")
-        layout.addWidget(self.info_label)
-        self.canvas = QFrame()
-        self.canvas.setStyleSheet("background:#0b1220;")
-        self.canvas.setMinimumHeight(440)
-        layout.addWidget(self.canvas)
-
-    def load_data(self):
-        df = get_kline_data(self.code, days=KLINE_DAYS)
-        if df is None or len(df) < 15:
-            self.info_label.setText("K线数据不足")
-            return
+    def set_data(self, df, hits, info):
         self._df = df
-        r = scan_one(self.code)
-        self._hits = r['hits'] if r else []
-        self.info_label.setText(self._build_info())
+        self._hits = hits or []
+        self._info = info or ""
         self.update()
 
-    def _build_info(self):
-        r = get_stock_raw(self.code)
-        if not r:
-            return f"{self.name} {self.code}"
-        ind = get_stock_industry(self.code)
-        ind_str = f" | {ind.get('industry','')}" if ind else ""
-        hits_str = " | ".join(f"{PATTERN_INFO[h['pattern']][0]}({h['pattern']})评分{h['score']:.0f}"
-                              for h in self._hits) if self._hits else "无形态命中"
-        return f"{self.name} {self.code} | 现价 {r.get('now',0):.2f} | 涨跌 {((r.get('now',0)/r.get('open',1)-1)*100):.2f}%{ind_str}\n命中: {hits_str}"
-
     def paintEvent(self, event):
-        if self._df is None:
-            return
-        painter = QPainter(self.canvas)
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        w = self.canvas.width()
-        h = self.canvas.height()
+        w = self.width()
+        h = self.height()
         painter.fillRect(0, 0, w, h, QColor('#0b1220'))
+
+        # 信息条
+        painter.setPen(QColor('#e2e8f0'))
+        f = QFont(); f.setPointSize(9); painter.setFont(f)
+        painter.drawText(10, 18, self._info[:120])
+
+        if self._df is None or len(self._df) < 2:
+            painter.setPen(QColor('#64748b'))
+            painter.drawText(w // 2 - 60, h // 2, "点击表格行查看 K 线")
+            return
+
         df = self._df
         n = len(df)
-        if n < 2:
-            return
+        pad_top = 34
+        ph = (h - pad_top - 40) * 0.68  # 价格区
+        vh = (h - pad_top - 40) * 0.28  # 量区
         highs = df['high'].values
         lows = df['low'].values
-        ph = h * 0.65
-        vh = h * 0.25
-        pad_top = 40
         pmin, pmax = lows.min(), highs.max()
         if pmax == pmin:
             return
@@ -134,6 +124,8 @@ class KlineDialog(QDialog):
         vols = df['volume'].values
         vmax = vols.max() if vols.max() > 0 else 1
         cw = (w - 40) / n
+
+        # K线
         for i in range(n):
             x = 20 + i * cw + cw / 2
             o, c = df['open'].iloc[i], df['close'].iloc[i]
@@ -147,11 +139,13 @@ class KlineDialog(QDialog):
             painter.drawLine(int(x), int(y_h), int(x), int(y_l))
             body_h = max(abs(y_c - y_o), 1)
             painter.fillRect(int(x - cw * 0.35), int(min(y_o, y_c)), int(cw * 0.7), int(body_h), color)
-            v_y0 = pad_top + ph + 30
+            # 成交量
+            v_y0 = pad_top + ph + 16
             v_h = vols[i] / vmax * vh
-            painter.fillRect(int(x - cw * 0.35), int(v_y0 + vh - v_h), int(cw * 0.7), int(v_h),
-                             QColor('#475569') if i != n - 1 else QColor('#fbbf24'))
-        # MA20
+            vcolor = QColor('#475569') if i != n - 1 else QColor('#fbbf24')
+            painter.fillRect(int(x - cw * 0.35), int(v_y0 + vh - v_h), int(cw * 0.7), int(v_h), vcolor)
+
+        # MA20 线
         painter.setPen(QPen(QColor('#fbbf24'), 1.5))
         prev = None
         for i in range(n):
@@ -162,21 +156,24 @@ class KlineDialog(QDialog):
             if prev:
                 painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
             prev = (x, y)
+
+        # 形态标注（右上角）
         if self._hits:
-            tags = "  ".join(f"[{h['pattern']} {PATTERN_INFO[h['pattern']][0]}]" for h in self._hits)
+            tags = "  ".join(f"[{h['pattern']}]" for h in self._hits)
             painter.setPen(QColor('#fbbf24'))
-            f = QFont(); f.setPointSize(9); f.setBold(True); painter.setFont(f)
-            painter.drawText(10, 22, f"形态: {tags}")
+            f2 = QFont(); f2.setPointSize(9); f2.setBold(True); painter.setFont(f2)
+            painter.drawText(w - 200, 18, f"形态: {tags}")
 
 
 # ============ 主窗 ============
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("趋势中继多策略选股扫描器")
-        self.resize(1280, 760)
+        self.setWindowTitle("趋势中继多策略选股扫描器 v2")
+        self.resize(1280, 820)
         self.results = []
         self.scan_thread = None
+        self._pending_row = None
         self.init_ui()
         self.setStyleSheet(self._dark_style())
 
@@ -190,7 +187,7 @@ class MainWindow(QMainWindow):
         QLineEdit { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
                      border-radius: 4px; padding: 5px; }
         QPushButton { background: #334155; color: #e2e8f0; border: none;
-                       border-radius: 4px; padding: 6px 16px; font-weight: bold; }
+                       border-radius: 4px; padding: 6px 14px; font-weight: bold; }
         QPushButton:hover { background: #475569; }
         QPushButton:pressed { background: #1e293b; }
         QPushButton#scanBtn { background: #fbbf24; color: #000; }
@@ -213,6 +210,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
+        # ---- 顶部控制栏 ----
         ctrl = QGroupBox("扫描控制")
         ctrl_l = QHBoxLayout(ctrl)
         ctrl_l.addWidget(QLabel("指定代码(逗号分隔,空=全市场):"))
@@ -224,25 +222,30 @@ class MainWindow(QMainWindow):
         self.pat_combo.addItem("全部形态", "")
         for k, (name, _) in PATTERN_INFO.items():
             self.pat_combo.addItem(f"{k} {name}", k)
+        self.pat_combo.currentIndexChanged.connect(self._apply_pattern_filter)
         ctrl_l.addWidget(self.pat_combo)
-        self.scan_btn = QPushButton("开始扫描")
+
+        self.scan_btn = QPushButton("扫描")
         self.scan_btn.setObjectName("scanBtn")
-        self.scan_btn.clicked.connect(self.start_scan)
+        self.scan_btn.clicked.connect(self.toggle_scan)
         ctrl_l.addWidget(self.scan_btn)
-        self.stop_btn = QPushButton("停止")
-        self.stop_btn.setObjectName("stopBtn")
-        self.stop_btn.clicked.connect(self.stop_scan)
-        self.stop_btn.setEnabled(False)
-        ctrl_l.addWidget(self.stop_btn)
+
+        self.snap_btn = QPushButton("扫描并存快照")
+        self.snap_btn.clicked.connect(self.start_scan_snapshot)
+        ctrl_l.addWidget(self.snap_btn)
+
+        self.load_btn = QPushButton("加载本地快照")
+        self.load_btn.clicked.connect(self.load_snapshot)
+        ctrl_l.addWidget(self.load_btn)
+
         self.export_btn = QPushButton("导出CSV")
         self.export_btn.clicked.connect(self.export_csv)
         ctrl_l.addWidget(self.export_btn)
         layout.addWidget(ctrl)
 
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
-
+        # ---- splitter: 表格 + K线 ----
+        self.splitter = QSplitter(Qt.Vertical)
+        # 表格
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
             ["代码", "名称", "现价", "涨跌%", "命中形态", "评分", "行业", "概念", "形态详情"])
@@ -253,28 +256,66 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(4, 130); self.table.setColumnWidth(5, 60)
         self.table.setColumnWidth(6, 100); self.table.setColumnWidth(7, 200)
         self.table.setSortingEnabled(True)
-        self.table.doubleClicked.connect(self.on_double_click)
-        layout.addWidget(self.table, 1)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.splitter.addWidget(self.table)
+        # K线区
+        self.kline_container = QWidget()
+        self.kline_container.setMinimumHeight(200)
+        kl = QVBoxLayout(self.kline_container)
+        kl.setContentsMargins(2, 2, 2, 2)
+        self.kline_info = QLabel("（点击表格行查看 K 线）")
+        self.kline_info.setStyleSheet("color:#cfd6e4; padding:2px;")
+        kl.addWidget(self.kline_info)
+        self.kline_canvas = KlineCanvas()
+        kl.addWidget(self.kline_canvas)
+        self.kline_container.setVisible(False)
+        self.splitter.addWidget(self.kline_container)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setSizes([500, 320])
+        layout.addWidget(self.splitter, 1)
 
+        # ---- 进度条 ----
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        # ---- 状态栏 ----
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.stat_label = QLabel("就绪")
         self.status.addWidget(self.stat_label)
 
-    def start_scan(self):
+        # 防抖定时器
+        self._kline_timer = QTimer(self)
+        self._kline_timer.setSingleShot(True)
+        self._kline_timer.timeout.connect(self._flush_pending_kline)
+
+    # ---------- 扫描控制 ----------
+    def toggle_scan(self):
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.stop_scan()
+        else:
+            self.start_scan()
+
+    def start_scan(self, snapshot=False):
         code_text = self.code_edit.text().strip()
         codes = [c.strip() for c in code_text.split(',') if c.strip()] if code_text else None
-        self.scan_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.scan_btn.setText("停止")
+        self.snap_btn.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.table.setRowCount(0)
-        self.stat_label.setText("扫描中...")
+        self.stat_label.setText("扫描中（存快照）..." if snapshot else "扫描中...")
+        self._snapshot_mode = snapshot
         self.scan_thread = ScanThread(codes=codes)
         self.scan_thread.progress.connect(self.on_progress)
         self.scan_thread.result.connect(self.on_result)
         self.scan_thread.finished_msg.connect(self.on_finished)
         self.scan_thread.start()
+
+    def start_scan_snapshot(self):
+        self.start_scan(snapshot=True)
 
     def stop_scan(self):
         if self.scan_thread:
@@ -295,15 +336,88 @@ class MainWindow(QMainWindow):
                 pc[h['pattern']] += 1
         stat = " | ".join(f"{PATTERN_INFO[k][0]}: {v}" for k, v in sorted(pc.items()))
         self.stat_label.setText(f"完成 | 命中 {len(results)} 只 | {stat}")
+
+        # 快照模式：存盘
+        if getattr(self, '_snapshot_mode', False) and results:
+            self._save_snapshot(results)
         self.on_finished("")
 
     def on_finished(self, msg):
         if msg:
             self.stat_label.setText(msg)
-        self.scan_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self.scan_btn.setText("扫描")
+        self.snap_btn.setEnabled(True)
         self.progress.setVisible(False)
 
+    # ---------- 快照 ----------
+    def _save_snapshot(self, results):
+        try:
+            os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+            rows = []
+            for r in results:
+                for h in r['hits']:
+                    rows.append({
+                        'code': r['code'], 'name': r['name'], 'close': r['close'],
+                        'zdf': round(r['zdf'], 2), 'industry': r.get('industry', ''),
+                        'concept': r.get('concept', ''),
+                        'pattern': h['pattern'], 'pattern_name': PATTERN_INFO[h['pattern']][0],
+                        'score': round(h['score'], 1),
+                        **{k: v for k, v in h.items() if k not in ('pattern', 'name', 'score')}
+                    })
+            df = pd.DataFrame(rows)
+            df.to_csv(SNAPSHOT_FILE, index=False, encoding='utf-8-sig')
+            meta = {'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'count': len(results), 'kline_days': KLINE_DAYS}
+            with open(SNAPSHOT_META, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            self.stat_label.setText(
+                f"快照已保存: {SNAPSHOT_FILE} | {len(rows)} 条 | 现在可离线加载筛选")
+        except Exception as e:
+            QMessageBox.warning(self, "快照保存失败", str(e))
+
+    def load_snapshot(self):
+        if not os.path.exists(SNAPSHOT_FILE):
+            QMessageBox.information(self, "提示", "无本地快照，请先「扫描并存快照」")
+            return
+        try:
+            df = pd.read_csv(SNAPSHOT_FILE, encoding='utf-8-sig')
+            meta = {}
+            if os.path.exists(SNAPSHOT_META):
+                with open(SNAPSHOT_META, encoding='utf-8') as f:
+                    meta = json.load(f)
+            # 重建 results 结构
+            results_map = {}
+            for _, row in df.iterrows():
+                code = row['code']
+                if code not in results_map:
+                    results_map[code] = {
+                        'code': code, 'name': row['name'], 'close': row['close'],
+                        'zdf': row['zdf'], 'industry': row.get('industry', ''),
+                        'concept': row.get('concept', ''), 'hits': [], 'patterns': ''
+                    }
+                h = {k: row[k] for k in ['pattern', 'score'] if k in row}
+                h['name'] = PATTERN_INFO.get(h['pattern'], ('',))[0]
+                # 补充形态字段
+                for k in ['big_date', 'big_close', 'pullback_days', 'pullback_pct',
+                          'tail_vol_ratio', 'shrink_days', 'range_pct', 'break_vol_ratio',
+                          'break_zdf', 'trend_days', 'vol_steps', 'zdf', 'dev_ma20',
+                          'ma20', 'dist_ma20', 'zdf20', 'break_date', 'prev_high',
+                          'near_high_pct']:
+                    if k in row and pd.notna(row[k]):
+                        h[k] = row[k]
+                results_map[code]['hits'].append(h)
+            results = list(results_map.values())
+            for r in results:
+                r['best_score'] = max(h['score'] for h in r['hits'])
+                r['patterns'] = ','.join(sorted({h['pattern'] for h in r['hits']}))
+            self.results = results
+            self.populate_table(results)
+            self.stat_label.setText(
+                f"已加载本地快照 | {len(results)} 只 | 保存于 {meta.get('saved_at','未知')}")
+        except Exception as e:
+            QMessageBox.critical(self, "加载快照失败", str(e))
+
+    # ---------- 表格 ----------
     def populate_table(self, results):
         pat_filter = self.pat_combo.currentData()
         filtered = [r for r in results if not pat_filter or pat_filter in r['patterns']] if pat_filter else results
@@ -329,6 +443,11 @@ class MainWindow(QMainWindow):
             self._set_item(row, 7, r.get('concept', '')[:40])
             detail = " | ".join(f"{PATTERN_INFO[h['pattern']][0]}" for h in r['hits'])
             self._set_item(row, 8, detail)
+            # 存 row_data 供 K线刷新
+            for col in range(9):
+                it = self.table.item(row, col)
+                if it:
+                    it.setData(Qt.UserRole + 1, r)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(5, 2)
 
@@ -337,13 +456,39 @@ class MainWindow(QMainWindow):
         item.setTextAlignment(align | Qt.AlignVCenter)
         self.table.setItem(row, col, item)
 
-    def on_double_click(self, idx):
-        row = idx.row()
-        code = self.table.item(row, 0).text()
-        name = self.table.item(row, 1).text()
-        dlg = KlineDialog(code, name, self)
-        dlg.exec_()
+    def _apply_pattern_filter(self):
+        if self.results:
+            self.populate_table(self.results)
 
+    # ---------- 实时K线（选中行即显示）----------
+    def _on_selection_changed(self):
+        items = self.table.selectedItems()
+        if not items:
+            return
+        item = items[0]
+        row_data = item.data(Qt.UserRole + 1)
+        if not row_data:
+            return
+        if not self.kline_container.isVisible():
+            self.kline_container.setVisible(True)
+        self._pending_row = row_data
+        self._kline_timer.start(150)  # 防抖
+
+    def _flush_pending_kline(self):
+        if self._pending_row is None:
+            return
+        r = self._pending_row
+        code = r['code']
+        try:
+            df = get_kline_data(code, days=KLINE_DAYS)
+            hits = r.get('hits', [])
+            info = f"{r['name']} {code} | 现价 {r['close']:.2f} | 涨跌 {r['zdf']:+.2f}% | {r.get('industry','')}"
+            self.kline_info.setText(info)
+            self.kline_canvas.set_data(df, hits, info)
+        except Exception as e:
+            self.kline_info.setText(f"K线加载失败: {e}")
+
+    # ---------- 导出 ----------
     def export_csv(self):
         if not self.results:
             QMessageBox.information(self, "提示", "无数据可导出")
