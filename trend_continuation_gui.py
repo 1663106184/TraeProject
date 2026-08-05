@@ -104,7 +104,7 @@ class KlineLoadThread(QThread):
 
 # ============ K线画布 ============
 class KlineCanvas(QFrame):
-    """自绘 K 线图（蜡烛+成交量+MA20+形态标注）"""
+    """自绘 K 线图（蜡烛+成交量+MA5/10/20/60+BOLL+MACD+KDJ+RSI+形态标注）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -113,6 +113,7 @@ class KlineCanvas(QFrame):
         self._df = None
         self._hits = []
         self._info = ""
+        self.show_flags = {'ma': True, 'boll': False, 'macd': False, 'kdj': False, 'rsi': False}
 
     def set_data(self, df, hits, info):
         self._df = df
@@ -120,89 +121,256 @@ class KlineCanvas(QFrame):
         self._info = info or ""
         self.update()
 
+    def _y_of(self, val, pmin, pmax, price_h):
+        return int((pmax - val) / (pmax - pmin) * price_h)
+
+    def _draw_line(self, p, series, pmin, pmax, price_h, kw, n, cw, color, width=1.5, x_offset=20):
+        pen = QPen(color, width); p.setPen(pen)
+        prev = None
+        step = kw / n
+        for i in range(n):
+            val = series.iloc[i] if hasattr(series, 'iloc') else series[i]
+            if val != val:
+                prev = None; continue
+            x = int(x_offset + i * step + cw / 2)
+            y = self._y_of(float(val), pmin, pmax, price_h)
+            if prev:
+                p.drawLine(prev[0], prev[1], x, y)
+            prev = (x, y)
+
+    def _draw_sub_line(self, p, series, sub_pmin, sub_pmax, sub_h, sub_top, kw, n, cw, color, width=1.5, x_offset=20):
+        pen = QPen(color, width); p.setPen(pen)
+        prev = None
+        step = kw / n
+        for i in range(n):
+            val = series.iloc[i] if hasattr(series, 'iloc') else series[i]
+            if val != val:
+                prev = None; continue
+            x = int(x_offset + i * step + cw / 2)
+            y = int((sub_pmax - float(val)) / (sub_pmax - sub_pmin) * sub_h) + sub_top
+            if prev:
+                p.drawLine(prev[0], prev[1], x, y)
+            prev = (x, y)
+
     def paintEvent(self, event):
         try:
             self._paint(event)
         except Exception as e:
-            # 绘图异常不崩溃，显示具体错误方便排查
             painter = QPainter(self)
             painter.fillRect(0, 0, self.width(), self.height(), QColor('#0b1220'))
             painter.setPen(QColor('#ef4444'))
             painter.drawText(10, 20, f"K线绘制异常: {e}")
 
     def _paint(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        from PyQt5.QtGui import QBrush
+        from PyQt5.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
         w = self.width()
         h = self.height()
-        painter.fillRect(0, 0, w, h, QColor('#0b1220'))
+        p.fillRect(0, 0, w, h, QColor('#0b1220'))
 
         # 信息条
-        painter.setPen(QColor('#e2e8f0'))
-        f = QFont(); f.setPointSize(9); painter.setFont(f)
-        painter.drawText(10, 18, self._info[:120])
+        p.setPen(QColor('#e2e8f0'))
+        f = QFont(); f.setPointSize(9); p.setFont(f)
+        p.drawText(10, 18, self._info[:120])
 
         if self._df is None or len(self._df) < 2:
-            painter.setPen(QColor('#64748b'))
-            painter.drawText(w // 2 - 60, h // 2, "点击表格行查看 K 线")
+            p.setPen(QColor('#64748b'))
+            p.drawText(w // 2 - 60, h // 2, "点击表格行查看 K 线")
             return
 
         df = self._df
         n = len(df)
-        pad_top = 34
-        ph = (h - pad_top - 40) * 0.68  # 价格区
-        vh = (h - pad_top - 40) * 0.28  # 量区
-        # 显式转 float（和其他GUI一致，避免object类型导致绘图异常）
+        x_offset = 20
+        kw = w - 40  # 画图宽度
+
+        # 确定副图数量
+        sub_indicators = [k for k in ('macd', 'kdj', 'rsi') if self.show_flags.get(k, False)]
+        n_sub = len(sub_indicators)
+
+        # 垂直布局：信息(24) + 主图 + 量图 + N副图
+        pad_top = 28
+        avail = h - pad_top - 10
+        if n_sub == 0:
+            price_h = int(avail * 0.68)
+            vol_h = int(avail * 0.28)
+        else:
+            price_h = int(avail * max(0.38, 0.55 - n_sub * 0.06))
+            vol_h = int(avail * 0.15)
+            sub_h_each = (avail - price_h - vol_h) // n_sub if n_sub else 0
+        vol_top = pad_top + price_h + 6
+        sub_regions = []
+        cur_top = vol_top + vol_h + 6
+        for name in sub_indicators:
+            sub_regions.append((name, cur_top, sub_h_each))
+            cur_top += sub_h_each + 4
+
+        # 数据转 float
         highs = df['high'].astype(float).values
         lows = df['low'].astype(float).values
         opens = df['open'].astype(float).values
         closes = df['close'].astype(float).values
         vols = df['volume'].astype(float).values
+        close_s = df['close'].astype(float)
+
         pmin, pmax = float(lows.min()), float(highs.max())
         if pmax <= pmin:
             pmax = pmin + 1
-        ma20_vals = df['close'].astype(float).rolling(20).mean().values
-        vmax = float(vols.max()) if vols.max() > 0 else 1.0
-        cw = (w - 40) / n
+        # BOLL 纳入范围
+        if self.show_flags.get('boll', False) and n >= 20:
+            ma20 = close_s.rolling(20).mean()
+            std20 = close_s.rolling(20).std()
+            boll_lo = ma20 - 2 * std20
+            boll_up = ma20 + 2 * std20
+            pmin = min(pmin, float(np.nanmin(boll_lo.values)))
+            pmax = max(pmax, float(np.nanmax(boll_up.values)))
+        pad = (pmax - pmin) * 0.05
+        pmin -= pad; pmax += pad
 
-        # K线
+        cw = max(3, kw / n - 1)
+        vmax = float(vols.max()) if vols.max() > 0 else 1.0
+
+        # 网格线 + 价格刻度
+        p.setPen(QPen(QColor('#2a3142'), 1, Qt.DashLine))
+        for gi in range(5):
+            y = pad_top + int(price_h * gi / 4)
+            p.drawLine(x_offset, y, x_offset + kw, y)
+            price = pmax - (pmax - pmin) * gi / 4
+            p.setPen(QColor('#7a8499'))
+            p.drawText(x_offset + 2, y + 12, f"{price:.2f}")
+            p.setPen(QPen(QColor('#2a3142'), 1, Qt.DashLine))
+
+        # 蜡烛图 + 成交量
         for i in range(n):
-            x = 20 + i * cw + cw / 2
+            x = int(x_offset + i * kw / n + cw / 2)
             o, c = float(opens[i]), float(closes[i])
             hi, lo = float(highs[i]), float(lows[i])
-            y_o = pad_top + (pmax - o) / (pmax - pmin) * ph
-            y_c = pad_top + (pmax - c) / (pmax - pmin) * ph
-            y_h = pad_top + (pmax - hi) / (pmax - pmin) * ph
-            y_l = pad_top + (pmax - lo) / (pmax - pmin) * ph
-            color = QColor('#ef4444') if c < o else QColor('#22c55e')
-            painter.setPen(QPen(color, 1))
-            painter.drawLine(int(x), int(y_h), int(x), int(y_l))
-            body_h = max(abs(y_c - y_o), 1)
-            painter.fillRect(int(x - cw * 0.35), int(min(y_o, y_c)), int(cw * 0.7), int(body_h), color)
+            up = c >= o
+            color = QColor('#ef4444') if up else QColor('#22c55e')
+            p.setPen(QPen(color, 1))
+            y_hi = self._y_of(hi, pmin, pmax, price_h) + pad_top
+            y_lo = self._y_of(lo, pmin, pmax, price_h) + pad_top
+            p.drawLine(x, y_hi, x, y_lo)
+            y_o = self._y_of(o, pmin, pmax, price_h) + pad_top
+            y_c = self._y_of(c, pmin, pmax, price_h) + pad_top
+            body_h = max(1, abs(y_o - y_c))
+            p.setBrush(QBrush(color))
+            p.drawRect(QRectF(x - cw / 2, min(y_o, y_c), cw, body_h))
             # 成交量
-            v_y0 = pad_top + ph + 16
-            v_h = vols[i] / vmax * vh
-            vcolor = QColor('#475569') if i != n - 1 else QColor('#fbbf24')
-            painter.fillRect(int(x - cw * 0.35), int(v_y0 + vh - v_h), int(cw * 0.7), int(v_h), vcolor)
+            v_h = int(vols[i] / vmax * vol_h)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(color))
+            p.drawRect(QRectF(x - cw / 2, vol_top + vol_h - v_h, cw, v_h))
 
-        # MA20 线
-        painter.setPen(QPen(QColor('#fbbf24'), 1.5))
-        prev = None
-        for i in range(n):
-            if np.isnan(ma20_vals[i]):
-                continue
-            x = 20 + i * cw + cw / 2
-            y = pad_top + (pmax - ma20_vals[i]) / (pmax - pmin) * ph
-            if prev:
-                painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
-            prev = (x, y)
+        # ---- 主图叠加指标 ----
+        # 均线 MA5/10/20/60
+        if self.show_flags.get('ma', True):
+            ma_defs = [(5, QColor('#ffcc00')), (10, QColor('#ff6a00')),
+                       (20, QColor('#a974ff')), (60, QColor('#36c5f0'))]
+            for period, col in ma_defs:
+                if n < period:
+                    continue
+                ma = close_s.rolling(period).mean()
+                self._draw_line(p, ma, pmin, pmax, price_h, kw, n, cw, col, 1.5, x_offset)
+            # 图例
+            lx = x_offset + kw - 280
+            for period, col in ma_defs:
+                if n < period:
+                    continue
+                p.setPen(col)
+                p.drawLine(lx, pad_top + 10, lx + 16, pad_top + 10)
+                p.setPen(QColor('#cfd6e4'))
+                p.drawText(lx + 20, pad_top + 14, f"MA{period}")
+                lx += 70
+
+        # BOLL
+        if self.show_flags.get('boll', False) and n >= 20:
+            self._draw_line(p, boll_up, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset)
+            self._draw_line(p, boll_lo, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset)
+            self._draw_line(p, ma20, pmin, pmax, price_h, kw, n, cw, QColor('#ffcc00'), 1, x_offset)
+            p.setPen(QColor('#cfd6e4'))
+            p.drawText(x_offset + kw - 70, pad_top + 14, "BOLL")
+
+        # 成交量标题
+        p.setPen(QColor('#7a8499'))
+        p.drawText(x_offset + 2, vol_top + 12, "成交量")
+
+        # ---- 副图指标 ----
+        for name, sub_top, sub_h in sub_regions:
+            if name == 'macd':
+                ema12 = close_s.ewm(span=12, adjust=False).mean()
+                ema26 = close_s.ewm(span=26, adjust=False).mean()
+                dif = ema12 - ema26
+                dea = dif.ewm(span=9, adjust=False).mean()
+                macd = (dif - dea) * 2
+                allvals = list(dif.dropna()) + list(dea.dropna()) + list(macd.dropna())
+                if allvals:
+                    spmin, spmax = min(allvals), max(allvals)
+                    if spmax <= spmin: spmax = spmin + 1
+                    pad2 = (spmax - spmin) * 0.1; spmin -= pad2; spmax += pad2
+                    zero_y = int((spmax - 0) / (spmax - spmin) * sub_h) + sub_top
+                    p.setPen(QPen(QColor('#2a3142'), 1, Qt.DashLine))
+                    p.drawLine(x_offset, zero_y, x_offset + kw, zero_y)
+                    # MACD 柱
+                    p.setPen(Qt.NoPen)
+                    for i in range(n):
+                        val = macd.iloc[i]
+                        if val != val: continue
+                        x = int(x_offset + i * kw / n + cw / 2)
+                        y = int((spmax - float(val)) / (spmax - spmin) * sub_h) + sub_top
+                        col = QColor('#ef4444') if float(val) >= 0 else QColor('#22c55e')
+                        p.setBrush(QBrush(col))
+                        p.drawRect(QRectF(x - cw / 2, min(y, zero_y), max(1, cw), abs(y - zero_y)))
+                    self._draw_sub_line(p, dif, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#ffcc00'), 1.5, x_offset)
+                    self._draw_sub_line(p, dea, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#ff6a00'), 1.5, x_offset)
+                    p.setPen(QColor('#7a8499'))
+                    p.drawText(x_offset + 2, sub_top + 12, f"MACD  DIF={float(dif.iloc[-1]):.3f}  DEA={float(dea.iloc[-1]):.3f}")
+
+            elif name == 'kdj':
+                low_n = df['low'].astype(float).rolling(9, min_periods=1).min()
+                high_n = df['high'].astype(float).rolling(9, min_periods=1).max()
+                rsv = (close_s - low_n) / (high_n - low_n) * 100
+                rsv = rsv.fillna(50)
+                k = rsv.ewm(com=2, adjust=False).mean()
+                d = k.ewm(com=2, adjust=False).mean()
+                j = 3 * k - 2 * d
+                spmin, spmax = float(j.min()), float(j.max())
+                if spmax <= spmin: spmax = spmin + 1
+                pad2 = (spmax - spmin) * 0.1; spmin -= pad2; spmax += pad2
+                for ref in (20, 50, 80):
+                    ry = int((spmax - ref) / (spmax - spmin) * sub_h) + sub_top
+                    p.setPen(QPen(QColor('#2a3142'), 1, Qt.DashLine))
+                    p.drawLine(x_offset, ry, x_offset + kw, ry)
+                self._draw_sub_line(p, k, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#ffcc00'), 1.5, x_offset)
+                self._draw_sub_line(p, d, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#ff6a00'), 1.5, x_offset)
+                self._draw_sub_line(p, j, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#a974ff'), 1.5, x_offset)
+                p.setPen(QColor('#7a8499'))
+                p.drawText(x_offset + 2, sub_top + 12, f"KDJ  K={float(k.iloc[-1]):.2f}  D={float(d.iloc[-1]):.2f}  J={float(j.iloc[-1]):.2f}")
+
+            elif name == 'rsi':
+                delta = close_s.diff()
+                gain = delta.clip(lower=0)
+                loss = -delta.clip(upper=0)
+                avg_gain = gain.ewm(alpha=1 / 6, adjust=False).mean()
+                avg_loss = loss.ewm(alpha=1 / 6, adjust=False).mean()
+                rs = avg_gain / avg_loss.replace(0, np.nan)
+                rsi = (100 - 100 / (1 + rs)).fillna(50)
+                spmin, spmax = 0, 100
+                for ref in (20, 50, 80):
+                    ry = int((spmax - ref) / (spmax - spmin) * sub_h) + sub_top
+                    p.setPen(QPen(QColor('#2a3142'), 1, Qt.DashLine))
+                    p.drawLine(x_offset, ry, x_offset + kw, ry)
+                self._draw_sub_line(p, rsi, spmin, spmax, sub_h, sub_top, kw, n, cw, QColor('#36c5f0'), 1.5, x_offset)
+                p.setPen(QColor('#7a8499'))
+                p.drawText(x_offset + 2, sub_top + 12, f"RSI(6)  {float(rsi.iloc[-1]):.2f}")
 
         # 形态标注（右上角）
         if self._hits:
             tags = "  ".join(f"[{h['pattern']}]" for h in self._hits)
-            painter.setPen(QColor('#fbbf24'))
-            f2 = QFont(); f2.setPointSize(9); f2.setBold(True); painter.setFont(f2)
-            painter.drawText(w - 200, 18, f"形态: {tags}")
+            p.setPen(QColor('#fbbf24'))
+            f2 = QFont(); f2.setPointSize(9); f2.setBold(True); p.setFont(f2)
+            p.drawText(w - 200, 18, f"形态: {tags}")
 
 
 # ============ 主窗 ============
@@ -303,9 +471,26 @@ class MainWindow(QMainWindow):
         self.kline_container.setMinimumHeight(200)
         kl = QVBoxLayout(self.kline_container)
         kl.setContentsMargins(2, 2, 2, 2)
+        # 顶部信息条 + 指标勾选
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
         self.kline_info = QLabel("（点击表格行查看 K 线）")
         self.kline_info.setStyleSheet("color:#cfd6e4; padding:2px;")
-        kl.addWidget(self.kline_info)
+        top_bar.addWidget(self.kline_info, 1)
+        top_bar.addWidget(QLabel("指标:"))
+        self.cb_ind_ma = QCheckBox("均线")
+        self.cb_ind_ma.setChecked(True)
+        self.cb_ind_boll = QCheckBox("BOLL")
+        self.cb_ind_macd = QCheckBox("MACD")
+        self.cb_ind_kdj = QCheckBox("KDJ")
+        self.cb_ind_rsi = QCheckBox("RSI")
+        for cb in (self.cb_ind_ma, self.cb_ind_boll, self.cb_ind_macd,
+                    self.cb_ind_kdj, self.cb_ind_rsi):
+            cb.setFixedHeight(24)
+            cb.setStyleSheet("QCheckBox{color:#cfd6e4; padding:0 4px}")
+            cb.toggled.connect(self._on_indicator_toggled)
+            top_bar.addWidget(cb)
+        kl.addLayout(top_bar)
         self.kline_canvas = KlineCanvas()
         kl.addWidget(self.kline_canvas)
         self.kline_container.setVisible(False)
@@ -534,6 +719,17 @@ class MainWindow(QMainWindow):
     def _on_kline_loaded(self, code, df, hits, info):
         self.kline_info.setText(info)
         self.kline_canvas.set_data(df, hits, info)
+
+    def _on_indicator_toggled(self):
+        """指标勾选变化 -> 更新画布 show_flags 并重绘"""
+        self.kline_canvas.show_flags = {
+            'ma': self.cb_ind_ma.isChecked(),
+            'boll': self.cb_ind_boll.isChecked(),
+            'macd': self.cb_ind_macd.isChecked(),
+            'kdj': self.cb_ind_kdj.isChecked(),
+            'rsi': self.cb_ind_rsi.isChecked(),
+        }
+        self.kline_canvas.update()
 
     def _on_kline_failed(self, code, error):
         self.kline_info.setText(f"{code} K线加载失败: {error}")
