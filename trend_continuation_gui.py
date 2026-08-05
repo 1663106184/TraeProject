@@ -76,6 +76,29 @@ class ScanThread(QThread):
             self.finished_msg.emit(f'扫描出错: {e}')
 
 
+# ============ K线异步加载线程 ============
+class KlineLoadThread(QThread):
+    """子线程加载K线数据，避免主线程网络请求阻塞/崩溃"""
+    loaded = pyqtSignal(str, object, list, str)   # code, df, hits, info
+    failed = pyqtSignal(str, str)                  # code, error
+
+    def __init__(self, code, hits, info):
+        super().__init__()
+        self.code = code
+        self.hits = hits
+        self.info = info
+
+    def run(self):
+        try:
+            df = get_kline_data(self.code, days=KLINE_DAYS)
+            if df is None or len(df) < 2:
+                self.failed.emit(self.code, 'K线数据不足')
+                return
+            self.loaded.emit(self.code, df, self.hits, self.info)
+        except Exception as e:
+            self.failed.emit(self.code, str(e))
+
+
 # ============ K线画布 ============
 class KlineCanvas(QFrame):
     """自绘 K 线图（蜡烛+成交量+MA20+形态标注）"""
@@ -95,6 +118,16 @@ class KlineCanvas(QFrame):
         self.update()
 
     def paintEvent(self, event):
+        try:
+            self._paint(event)
+        except Exception:
+            # 绘图异常不崩溃，画个提示
+            painter = QPainter(self)
+            painter.fillRect(0, 0, self.width(), self.height(), QColor('#0b1220'))
+            painter.setPen(QColor('#ef4444'))
+            painter.drawText(10, 20, "K线绘制异常")
+
+    def _paint(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w = self.width()
@@ -291,6 +324,8 @@ class MainWindow(QMainWindow):
         self._kline_timer = QTimer(self)
         self._kline_timer.setSingleShot(True)
         self._kline_timer.timeout.connect(self._flush_pending_kline)
+        # K线加载线程引用（避免被GC）
+        self._kline_loader = None
 
     # ---------- 扫描控制 ----------
     def toggle_scan(self):
@@ -480,14 +515,23 @@ class MainWindow(QMainWindow):
             return
         r = self._pending_row
         code = r['code']
-        try:
-            df = get_kline_data(code, days=KLINE_DAYS)
-            hits = r.get('hits', [])
-            info = f"{r['name']} {code} | 现价 {r['close']:.2f} | 涨跌 {r['zdf']:+.2f}% | {r.get('industry','')}"
-            self.kline_info.setText(info)
-            self.kline_canvas.set_data(df, hits, info)
-        except Exception as e:
-            self.kline_info.setText(f"K线加载失败: {e}")
+        hits = r.get('hits', [])
+        info = f"{r['name']} {code} | 现价 {r['close']:.2f} | 涨跌 {r['zdf']:+.2f}% | {r.get('industry','')}"
+        self.kline_info.setText(info + "  (加载中...)")
+
+        # 异步加载K线（子线程，不阻塞GUI）
+        self._kline_loader = KlineLoadThread(code, hits, info)
+        self._kline_loader.loaded.connect(self._on_kline_loaded)
+        self._kline_loader.failed.connect(self._on_kline_failed)
+        self._kline_loader.start()
+
+    def _on_kline_loaded(self, code, df, hits, info):
+        self.kline_info.setText(info)
+        self.kline_canvas.set_data(df, hits, info)
+
+    def _on_kline_failed(self, code, error):
+        self.kline_info.setText(f"{code} K线加载失败: {error}")
+        self.kline_canvas.set_data(None, [], "")
 
     # ---------- 导出 ----------
     def export_csv(self):
