@@ -76,6 +76,31 @@ P5_PULLBACK_DAYS_MAX = 5     # 回踩最多天数
 P5_NEAR_HIGH_PCT = 3.0       # 回踩至前高 ± 此 %
 P5_SHRINK_RATIO = 0.7        # 回踩期量 < 突破日量 × 此值
 
+# P6 老鸭头形态（MA5下穿MA10不破MA20后重新上穿）
+P6_MA_SHORT = 5              # 短期均线
+P6_MA_MID = 10               # 中期均线
+P6_MA_LONG = 20              # 长期均线
+P6_NECK_DAYS_MIN = 5         # 鸭颈（多头排列）最少天数
+P6_HEAD_DAYS_MAX = 8         # 鸭头（MA5<MA10）最多天数
+P6_MA20_UP = True            # 要求MA20上行
+
+# P7 沿5日线缓慢上升趋势
+P7_TREND_DAYS = 10           # 趋势回看天数
+P7_MA_SHORT = 5              # 短期均线
+P7_HOLD_MA_DAYS_MIN = 7      # 沿5日线最少天数（收盘≥MA5）
+P7_DAILY_ZDF_MAX = 5.0       # 单日涨幅上限%（温和不是暴涨）
+P7_TOTAL_ZDF_MIN = 3.0       # 区间涨幅下限%
+P7_TOTAL_ZDF_MAX = 25.0      # 区间涨幅上限%（缓慢不是主升浪）
+P7_MA5_UP = True             # MA5上行
+
+# P8 均线吻形态（飞吻/舌吻，MA5贴近MA10后远离）
+P8_MA_SHORT = 5
+P8_MA_MID = 10
+P8_KISS_DAYS_MAX = 5         # 吻（贴合）最多天数
+P8_KISS_GAP_PCT = 1.0        # 吻时MA5与MA10差距≤此%（视作贴合）
+P8_SEP_GAP_PCT = 1.5         # 远离时MA5与MA10差距≥此%
+P8_MA_MID_UP = True           # MA10需上行（大趋势向上）
+
 
 # ============ 形态识别算法 ============
 
@@ -90,6 +115,19 @@ def _ma(df, period):
     if len(df) < period:
         return None
     return df['close'].iloc[-period:].mean()
+
+
+def _ma_series(df, period):
+    """返回整条 MA 均线（numpy 数组，前面不足部分为 NaN）"""
+    return df['close'].astype(float).rolling(period).mean().values
+
+
+def _ma_at(ma_arr, i):
+    """取 MA 数组第 i 项，NaN 安全"""
+    if i < 0 or i >= len(ma_arr):
+        return None
+    v = ma_arr[i]
+    return None if (v is None or np.isnan(v)) else float(v)
 
 
 def detect_P1(df):
@@ -357,9 +395,194 @@ def detect_P5(df):
     }
 
 
+def detect_P6(df):
+    """P6 老鸭头形态（MA5下穿MA10不破MA20后重新上穿）"""
+    need = P6_MA_LONG + P6_NECK_DAYS_MIN + P6_HEAD_DAYS_MAX + 2
+    if len(df) < need:
+        return None
+    closes = df['close'].astype(float).values
+    ma5 = _ma_series(df, P6_MA_SHORT)
+    ma10 = _ma_series(df, P6_MA_MID)
+    ma20 = _ma_series(df, P6_MA_LONG)
+
+    # 从后往前找：最近的 MA5 上穿 MA10（鸭嘴）
+    n = len(df)
+    mouth_idx = None
+    for i in range(n - 1, max(n - P6_HEAD_DAYS_MAX - P6_NECK_DAYS_MIN - 2, P6_MA_LONG - 1), -1):
+        s_prev = _ma_at(ma5, i - 1); s_now = _ma_at(ma5, i)
+        m_prev = _ma_at(ma10, i - 1); m_now = _ma_at(ma10, i)
+        if None in (s_prev, s_now, m_prev, m_now):
+            continue
+        if s_prev <= m_prev and s_now > m_now:   # 金叉
+            mouth_idx = i
+            break
+    if mouth_idx is None:
+        return None
+
+    # 鸭头：mouth 之前，MA5 < MA10 的连续天数
+    head_days = 0
+    for i in range(mouth_idx - 1, max(mouth_idx - P6_HEAD_DAYS_MAX - 1, P6_MA_LONG - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i); l = _ma_at(ma20, i)
+        if None in (s, m, l):
+            break
+        if s < m:                 # MA5 在 MA10 下方
+            if l > 0 and m >= l:  # 但 MA10 不破 MA20（鸭头不破长线）
+                head_days += 1
+            else:
+                return None       # 破了 MA20，不是老鸭头
+        else:
+            break
+    if head_days < 1:
+        return None
+
+    # 鸭颈：鸭头之前，MA5>MA10>MA20 多头排列
+    neck_days = 0
+    neck_start = mouth_idx - 1 - head_days
+    for i in range(neck_start, max(neck_start - P6_NECK_DAYS_MIN - 2, P6_MA_LONG - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i); l = _ma_at(ma20, i)
+        if None in (s, m, l):
+            break
+        if s > m > l:
+            neck_days += 1
+        else:
+            break
+    if neck_days < P6_NECK_DAYS_MIN:
+        return None
+
+    # MA20 上行
+    ma20_now = _ma_at(ma20, mouth_idx)
+    ma20_prev = _ma_at(ma20, mouth_idx - 5)
+    if P6_MA20_UP and (not ma20_now or not ma20_prev or ma20_now <= ma20_prev):
+        return None
+
+    return {
+        'pattern': 'P6',
+        'name': '老鸭头形态',
+        'mouth_date': df.iloc[mouth_idx]['date'],
+        'head_days': head_days,
+        'neck_days': neck_days,
+        'ma5': round(_ma_at(ma5, mouth_idx) or 0, 2),
+        'ma10': round(_ma_at(ma10, mouth_idx) or 0, 2),
+        'ma20': round(ma20_now or 0, 2),
+        'score': 82 + neck_days * 2 + head_days,
+    }
+
+
+def detect_P7(df):
+    """P7 沿5日线缓慢上升趋势（不破5日线温和上行）"""
+    need = P7_TREND_DAYS + P7_MA_SHORT + 2
+    if len(df) < need:
+        return None
+    closes = df['close'].astype(float).values
+    n = len(df)
+    ma5 = _ma_series(df, P7_MA_SHORT)
+
+    # 检查近 P7_TREND_DAYS 内：收盘价始终≥MA5（不破5日线）
+    start = n - P7_TREND_DAYS
+    hold_days = 0
+    for i in range(start, n):
+        s = _ma_at(ma5, i)
+        if s is None:
+            return None
+        if closes[i] >= s:
+            hold_days += 1
+        # 允许盘中破但收盘收回，这里用收盘价判断
+    if hold_days < P7_HOLD_MA_DAYS_MIN:
+        return None
+
+    # MA5 上行
+    ma5_now = _ma_at(ma5, n - 1)
+    ma5_prev = _ma_at(ma5, n - 1 - P7_MA_SHORT)
+    if P7_MA5_UP and (not ma5_now or not ma5_prev or ma5_now <= ma5_prev):
+        return None
+
+    # 区间涨幅温和（不是暴涨也不是横盘）
+    zdf = (closes[-1] / closes[start] - 1) * 100
+    if zdf < P7_TOTAL_ZDF_MIN or zdf > P7_TOTAL_ZDF_MAX:
+        return None
+
+    # 单日涨幅不超阈值（温和）
+    max_daily = 0
+    for i in range(start + 1, n):
+        d = (closes[i] / closes[i - 1] - 1) * 100
+        if d > max_daily:
+            max_daily = d
+    if max_daily > P7_DAILY_ZDF_MAX:
+        return None
+
+    return {
+        'pattern': 'P7',
+        'name': '沿5日线缓慢上升',
+        'hold_days': hold_days,
+        'trend_days': P7_TREND_DAYS,
+        'zdf': round(zdf, 2),
+        'max_daily': round(max_daily, 2),
+        'ma5': round(ma5_now, 2),
+        'score': 76 + hold_days * 1.5 + zdf * 0.3,
+    }
+
+
+def detect_P8(df):
+    """P8 均线吻形态（飞吻/舌吻：MA5贴近MA10后远离，贴近点=买点）"""
+    need = P8_MA_MID + P8_KISS_DAYS_MAX + 5
+    if len(df) < need:
+        return None
+    n = len(df)
+    ma5 = _ma_series(df, P8_MA_SHORT)
+    ma10 = _ma_series(df, P8_MA_MID)
+
+    # 找最近的"吻"区间：MA5 与 MA10 差距 ≤ P8_KISS_GAP_PCT%
+    # 然后当前 MA5 远离 MA10 向上（差距 ≥ P8_SEP_GAP_PCT%，且 MA5>MA10）
+    # 先看当前是否已分离
+    s_now = _ma_at(ma5, n - 1); m_now = _ma_at(ma10, n - 1)
+    if not s_now or not m_now or m_now <= 0:
+        return None
+    sep_gap = (s_now - m_now) / m_now * 100
+    if sep_gap < P8_SEP_GAP_PCT:
+        return None   # 当前还没远离，不构成"吻后分离"
+
+    # MA10 上行（大趋势向上）
+    m_prev = _ma_at(ma10, n - 1 - 5)
+    if P8_MA_MID_UP and (not m_prev or m_now <= m_prev):
+        return None
+
+    # 往前找吻区间：连续几天 gap ≤ P8_KISS_GAP_PCT%
+    kiss_end = n - 1
+    kiss_days = 0
+    for i in range(n - 2, max(n - 2 - P8_KISS_DAYS_MAX - 3, P8_MA_MID - 1), -1):
+        s = _ma_at(ma5, i); m = _ma_at(ma10, i)
+        if None in (s, m) or m <= 0:
+            break
+        gap = abs(s - m) / m * 100
+        if gap <= P8_KISS_GAP_PCT:
+            kiss_days += 1
+            kiss_end = i
+        else:
+            break
+    if kiss_days < 1:
+        return None
+
+    # 吻之前应该是 MA5>MA10（从上方下来吻），或 MA5<MA10（从下方上来吻后上穿）
+    # 这里只要求吻之后 MA5 在 MA10 上方（向上分离）
+    kiss_type = '飞吻' if kiss_days <= 2 else '舌吻'
+
+    return {
+        'pattern': 'P8',
+        'name': f'均线{kiss_type}（MA5贴近MA10后远离）',
+        'kiss_type': kiss_type,
+        'kiss_days': kiss_days,
+        'kiss_end_date': df.iloc[kiss_end]['date'],
+        'sep_gap': round(sep_gap, 2),
+        'ma5': round(s_now, 2),
+        'ma10': round(m_now, 2),
+        'score': 80 + kiss_days * 2 + sep_gap * 1.5,
+    }
+
+
 # ============ 单股扫描 ============
 
-PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5]
+PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5,
+                     detect_P6, detect_P7, detect_P8]
 
 
 def scan_one(code):
