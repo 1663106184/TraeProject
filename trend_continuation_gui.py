@@ -120,12 +120,12 @@ class KlineCanvas(QFrame):
     def paintEvent(self, event):
         try:
             self._paint(event)
-        except Exception:
-            # 绘图异常不崩溃，画个提示
+        except Exception as e:
+            # 绘图异常不崩溃，显示具体错误方便排查
             painter = QPainter(self)
             painter.fillRect(0, 0, self.width(), self.height(), QColor('#0b1220'))
             painter.setPen(QColor('#ef4444'))
-            painter.drawText(10, 20, "K线绘制异常")
+            painter.drawText(10, 20, f"K线绘制异常: {e}")
 
     def _paint(self, event):
         painter = QPainter(self)
@@ -149,21 +149,24 @@ class KlineCanvas(QFrame):
         pad_top = 34
         ph = (h - pad_top - 40) * 0.68  # 价格区
         vh = (h - pad_top - 40) * 0.28  # 量区
-        highs = df['high'].values
-        lows = df['low'].values
-        pmin, pmax = lows.min(), highs.max()
-        if pmax == pmin:
-            return
-        ma20_vals = df['close'].rolling(20).mean().values
-        vols = df['volume'].values
-        vmax = vols.max() if vols.max() > 0 else 1
+        # 显式转 float（和其他GUI一致，避免object类型导致绘图异常）
+        highs = df['high'].astype(float).values
+        lows = df['low'].astype(float).values
+        opens = df['open'].astype(float).values
+        closes = df['close'].astype(float).values
+        vols = df['volume'].astype(float).values
+        pmin, pmax = float(lows.min()), float(highs.max())
+        if pmax <= pmin:
+            pmax = pmin + 1
+        ma20_vals = df['close'].astype(float).rolling(20).mean().values
+        vmax = float(vols.max()) if vols.max() > 0 else 1.0
         cw = (w - 40) / n
 
         # K线
         for i in range(n):
             x = 20 + i * cw + cw / 2
-            o, c = df['open'].iloc[i], df['close'].iloc[i]
-            hi, lo = df['high'].iloc[i], df['low'].iloc[i]
+            o, c = float(opens[i]), float(closes[i])
+            hi, lo = float(highs[i]), float(lows[i])
             y_o = pad_top + (pmax - o) / (pmax - pmin) * ph
             y_c = pad_top + (pmax - c) / (pmax - pmin) * ph
             y_h = pad_top + (pmax - hi) / (pmax - pmin) * ph
