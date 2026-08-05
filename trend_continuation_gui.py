@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTableWidget, QTableWidgetItem,
     QProgressBar, QStatusBar, QHeaderView, QComboBox, QMessageBox,
-    QFileDialog, QGroupBox, QSplitter, QCheckBox, QFrame,
+    QFileDialog, QGroupBox, QSplitter, QCheckBox, QFrame, QSpinBox,
 )
 
 from stock_full_scan import get_kline_data, get_stock_raw, get_stock_industry
@@ -56,9 +56,10 @@ class ScanThread(QThread):
     result = pyqtSignal(list)
     finished_msg = pyqtSignal(str)
 
-    def __init__(self, codes=None):
+    def __init__(self, codes=None, days=None):
         super().__init__()
         self.codes = codes
+        self.days = days
         self._stop = False
 
     def stop(self):
@@ -70,7 +71,8 @@ class ScanThread(QThread):
         def stop_check():
             return self._stop
         try:
-            results = scan_market(codes=self.codes, on_progress=on_progress, stop_check=stop_check)
+            results = scan_market(codes=self.codes, on_progress=on_progress,
+                                  stop_check=stop_check, days=self.days)
             if self._stop:
                 self.finished_msg.emit('扫描已停止')
             else:
@@ -85,15 +87,16 @@ class KlineLoadThread(QThread):
     loaded = pyqtSignal(str, object, list, str)   # code, df, hits, info
     failed = pyqtSignal(str, str)                  # code, error
 
-    def __init__(self, code, hits, info):
+    def __init__(self, code, hits, info, days=120):
         super().__init__()
         self.code = code
         self.hits = hits
         self.info = info
+        self.days = days
 
     def run(self):
         try:
-            df = get_kline_data(self.code, days=KLINE_DAYS)
+            df = get_kline_data(self.code, days=self.days)
             if df is None or len(df) < 2:
                 self.failed.emit(self.code, 'K线数据不足')
                 return
@@ -433,6 +436,15 @@ class MainWindow(QMainWindow):
         self.pat_combo.currentIndexChanged.connect(self._apply_pattern_filter)
         ctrl_l.addWidget(self.pat_combo)
 
+        ctrl_l.addWidget(QLabel("K线天数:"))
+        self.spin_days = QSpinBox()
+        self.spin_days.setRange(30, 300)
+        self.spin_days.setSingleStep(10)
+        self.spin_days.setValue(KLINE_DAYS)
+        self.spin_days.setFixedWidth(70)
+        self.spin_days.setToolTip("K线回看天数（影响形态识别+显示）")
+        ctrl_l.addWidget(self.spin_days)
+
         self.scan_btn = QPushButton("扫描")
         self.scan_btn.setObjectName("scanBtn")
         self.scan_btn.clicked.connect(self.toggle_scan)
@@ -535,7 +547,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.stat_label.setText("扫描中（存快照）..." if snapshot else "扫描中...")
         self._snapshot_mode = snapshot
-        self.scan_thread = ScanThread(codes=codes)
+        self.scan_thread = ScanThread(codes=codes, days=self.spin_days.value())
         self.scan_thread.progress.connect(self.on_progress)
         self.scan_thread.result.connect(self.on_result)
         self.scan_thread.finished_msg.connect(self.on_finished)
@@ -711,7 +723,8 @@ class MainWindow(QMainWindow):
         self.kline_info.setText(info + "  (加载中...)")
 
         # 异步加载K线（子线程，不阻塞GUI）
-        self._kline_loader = KlineLoadThread(code, hits, info)
+        days = self.spin_days.value()
+        self._kline_loader = KlineLoadThread(code, hits, info, days=days)
         self._kline_loader.loaded.connect(self._on_kline_loaded)
         self._kline_loader.failed.connect(self._on_kline_failed)
         self._kline_loader.start()

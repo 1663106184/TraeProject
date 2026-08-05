@@ -38,7 +38,7 @@ from stock_full_scan import (
 )
 
 # ---------------- 全局参数 ----------------
-KLINE_DAYS = 60              # K 线回看天数
+KLINE_DAYS = 120             # K 线回看天数（显示+形态识别共用）
 MAX_WORKERS = 30             # 并发数
 
 # P1 放量涨后缩量回调
@@ -585,13 +585,13 @@ PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5,
                      detect_P6, detect_P7, detect_P8]
 
 
-def scan_one(code):
+def scan_one(code, days=None):
     """扫描单只股票，返回所有命中的形态。返回 dict 或 None。"""
     try:
         stock = get_stock_raw(code)
         if not stock or stock.get('volume', 0) <= 0:
             return None
-        df = get_kline_data(code, days=KLINE_DAYS)
+        df = get_kline_data(code, days=days or KLINE_DAYS)
         if df is None or len(df) < 15:
             return None
 
@@ -621,18 +621,20 @@ def scan_one(code):
 
 # ============ 全市场扫描 ============
 
-def scan_market(codes=None, max_workers=MAX_WORKERS, on_progress=None, stop_check=None):
+def scan_market(codes=None, max_workers=MAX_WORKERS, on_progress=None, stop_check=None, days=None):
     """全市场扫描。codes=None 时扫全市场。
     stop_check: 无参回调，返回 True 时立即停止扫描（取消未完成任务）。
+    days: K线回看天数，None 用 KLINE_DAYS 默认值。
     """
     if codes is None:
         codes = generate_stock_codes()
 
+    _days = days or KLINE_DAYS
     results = []
     total = len(codes)
     done = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(scan_one, c): c for c in codes}
+        futures = {ex.submit(scan_one, c, _days): c for c in codes}
         try:
             for fut in as_completed(futures):
                 # 检查停止标志
