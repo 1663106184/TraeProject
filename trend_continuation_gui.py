@@ -51,6 +51,7 @@ PATTERN_INFO = {
     'P14': ('量价齐升', '#60a5fa'),
     'P15': ('多头疏散后飞吻', '#e879f9'),
     'P16': ('死叉后企稳放量', '#fca5a5'),
+    'P17': ('主升后调整企稳放量', '#c084fc'),
 }
 
 SNAPSHOT_DIR = "snapshot"
@@ -132,10 +133,11 @@ class KlineCanvas(QFrame):
         self._info = info or ""
         self.update()
 
-    def _y_of(self, val, pmin, pmax, price_h):
-        return int((pmax - val) / (pmax - pmin) * price_h)
+    def _y_of(self, val, pmin, pmax, price_h, pad_top=0):
+        """价格 -> y 坐标（含 pad_top 偏移）。价格越高 y 越小（Qt y 轴向下）。"""
+        return int((pmax - val) / (pmax - pmin) * price_h) + pad_top
 
-    def _draw_line(self, p, series, pmin, pmax, price_h, kw, n, cw, color, width=1.5, x_offset=20):
+    def _draw_line(self, p, series, pmin, pmax, price_h, kw, n, cw, color, width=1.5, x_offset=20, pad_top=0):
         pen = QPen(color, width); p.setPen(pen)
         prev = None
         step = kw / n
@@ -144,7 +146,7 @@ class KlineCanvas(QFrame):
             if val != val:
                 prev = None; continue
             x = int(x_offset + i * step + cw / 2)
-            y = self._y_of(float(val), pmin, pmax, price_h)
+            y = self._y_of(float(val), pmin, pmax, price_h, pad_top)
             if prev:
                 p.drawLine(prev[0], prev[1], x, y)
             prev = (x, y)
@@ -283,7 +285,7 @@ class KlineCanvas(QFrame):
                 if n < period:
                     continue
                 ma = close_s.rolling(period).mean()
-                self._draw_line(p, ma, pmin, pmax, price_h, kw, n, cw, col, 1.5, x_offset)
+                self._draw_line(p, ma, pmin, pmax, price_h, kw, n, cw, col, 1.5, x_offset, pad_top)
             # 图例
             lx = x_offset + kw - 280
             for period, col in ma_defs:
@@ -297,9 +299,9 @@ class KlineCanvas(QFrame):
 
         # BOLL
         if self.show_flags.get('boll', False) and n >= 20:
-            self._draw_line(p, boll_up, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset)
-            self._draw_line(p, boll_lo, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset)
-            self._draw_line(p, ma20, pmin, pmax, price_h, kw, n, cw, QColor('#ffcc00'), 1, x_offset)
+            self._draw_line(p, boll_up, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset, pad_top)
+            self._draw_line(p, boll_lo, pmin, pmax, price_h, kw, n, cw, QColor('#8a8f9c'), 1, x_offset, pad_top)
+            self._draw_line(p, ma20, pmin, pmax, price_h, kw, n, cw, QColor('#ffcc00'), 1, x_offset, pad_top)
             p.setPen(QColor('#cfd6e4'))
             p.drawText(x_offset + kw - 70, pad_top + 14, "BOLL")
 
