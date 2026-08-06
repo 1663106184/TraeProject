@@ -1222,14 +1222,20 @@ def scan_one(code, days=None):
         if not hits:
             return None
 
-        ind = get_stock_industry(code)
+        ind = get_stock_industry(code) or {}
+        # 字段名与 stock_boll_volume_filter_gui 一致
+        industry = ind.get('同花顺行业', '') or ind.get('行业', '')
+        concept_list = ind.get('概念列表', []) or []
+        concept = ind.get('最相关概念', '') or (concept_list[0] if concept_list else '')
+        concept_str = ','.join(concept_list) if concept_list else concept
         return {
             'code': code,
             'name': stock.get('name', ''),
             'close': stock.get('now', 0),
             'zdf': (stock.get('now', 0) / stock.get('open', 1) - 1) * 100 if stock.get('open') else 0,
-            'industry': ind.get('industry', '') if ind else '',
-            'concept': ind.get('concept', '') if ind else '',
+            'industry': industry,
+            'concept': concept_str,
+            'concept_list': concept_list,
             'hits': hits,
             'best_score': max(h['score'] for h in hits),
             'patterns': ','.join(sorted({h['pattern'] for h in hits})),
