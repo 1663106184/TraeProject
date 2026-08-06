@@ -159,9 +159,20 @@ P16_ADJUST_DAYS_MIN = 5       # 调整（MA5<MA10）最少天数
 P16_ADJUST_DAYS_MAX = 20      # 调整最多天数（放宽）
 P16_SHRINK_RATIO = 0.9        # 调整期缩量（量<V_ma5×此，放宽）
 P16_SHRINK_DAYS_MIN = 3       # 调整期至少N天缩量（不必全部缩量）
-P16_RECOVER_VOL_RATIO = 1.1   # 企稳回升放量（量比≥此，放宽）
-P16_RECOVER_ZDF_MIN = 0.3     # 企稳回升涨幅≥此%（放宽）
+P16_RECOVER_VOL_RATIO = 1.1   # 企稳回升温和放量（量比≥此，且≤3.0避免突放天量）
+P16_RECOVER_ZDF_MIN = 0.3     # 企稳回升区间涨幅≥此%（温和上行）
 P16_HOLD_MA20_PCT = 0.95      # 调整不破MA20×此（放宽）
+
+# P17 主升后调整企稳放量（第二波启动，如生益科技类型）
+P17_LOOKBACK_DAYS = 120        # 回看总天数（约6个月）
+P17_ZT_COUNT_MIN = 2           # 回看期内涨停（涨幅≥9.6%）最少次数
+P17_MAIN_RALLY_ZDF_MIN = 30.0  # 主升段涨幅下限%（连续涨停/强势上涨）
+P17_ADJUST_DAYS_MIN = 20       # 调整最少天数（数周到数月）
+P17_ADJUST_HOLD_PCT = 0.50     # 调整期最低价 ≥ 主升起点 × 此（强势不破，0.5=回撤不超50%）
+P17_ADJUST_RANGE_PCT = 15.0    # 调整末期窄幅区间上限%（企稳横盘）
+P17_NARROW_DAYS_MIN = 10       # 企稳横盘最少天数
+P17_RECOVER_VOL_RATIO = 1.5    # 启动日量比（温和放量/放倍量）
+P17_RECOVER_ZDF_MIN = 1.0      # 启动日涨幅下限%
 
 
 # ============ 形态识别算法 ============
@@ -1059,13 +1070,28 @@ def detect_P16(df):
     if shrink_days < P16_SHRINK_DAYS_MIN:
         return None
 
-    # 企稳回升：最近1-2日温和放量上涨
-    recover_idx = adj_end + 1
-    if recover_idx >= n:
+    # 企稳回升：近几天温和放量（量递增，不是单日突放天量）
+    # 取调整结束后的最近几天，检查量能是否温和递增 + 价格上行
+    recover_start = adj_end + 1
+    if recover_start >= n:
         return None
-    rec_vol_ratio = vols[recover_idx] / vma5
-    rec_zdf = (closes[recover_idx] / closes[recover_idx - 1] - 1) * 100 if recover_idx > 0 else 0
-    if rec_vol_ratio < P16_RECOVER_VOL_RATIO or rec_zdf < P16_RECOVER_ZDF_MIN:
+    # 看近 MIN(5, 剩余) 天的量能是否温和递增
+    recover_days = min(5, n - recover_start)
+    if recover_days < 2:
+        return None
+    recover_vols = vols[recover_start:recover_start + recover_days]
+    recover_closes = closes[recover_start:recover_start + recover_days]
+    # 温和递增：后日量 > 前日量 的天数过半（不是单根天量）
+    inc_days = sum(1 for i in range(1, len(recover_vols)) if recover_vols[i] > recover_vols[i - 1])
+    if inc_days < recover_days * 0.5:
+        return None
+    # 量能从地量温和放大：最近量 / 调整期均量 在 1.1~3.0 之间（温和，不是突放天量）
+    rec_vol_ratio = float(recover_vols[-1]) / vma5
+    if rec_vol_ratio < P16_RECOVER_VOL_RATIO or rec_vol_ratio > 3.0:
+        return None
+    # 价格上行
+    rec_zdf = (recover_closes[-1] / recover_closes[0] - 1) * 100
+    if rec_zdf < P16_RECOVER_ZDF_MIN:
         return None
 
     return {
@@ -1075,10 +1101,98 @@ def detect_P16(df):
         'bull_days': bull_days,
         'adjust_days': adj_days,
         'shrink_days': shrink_days,
-        'recover_date': df.iloc[recover_idx]['date'],
+        'recover_days': recover_days,
         'recover_vol_ratio': round(float(rec_vol_ratio), 2),
         'recover_zdf': round(float(rec_zdf), 2),
-        'score': 83 + bull_days + adj_days + rec_vol_ratio * 2,
+        'recover_inc_days': inc_days,
+        'score': 83 + bull_days + adj_days + inc_days * 2 + rec_vol_ratio,
+    }
+
+
+def detect_P17(df):
+    """P17 主升后调整企稳放量（第二波启动，如生益科技类型）
+    历史有涨停基因/主升 -> 长期调整保持强势 -> 末期企稳横盘 -> 当前放量启动
+    """
+    if len(df) < P17_LOOKBACK_DAYS:
+        return None
+    n = len(df)
+    closes = df['close'].astype(float).values
+    highs = df['high'].astype(float).values
+    lows = df['low'].astype(float).values
+    vols = df['volume'].astype(float).values
+
+    # 1. 回看期内找涨停日（涨幅≥9.6%，用前收对比）
+    zt_days = []
+    for i in range(1, n):
+        zdf = (closes[i] / closes[i - 1] - 1) * 100
+        if zdf >= 9.6:
+            zt_days.append(i)
+    if len(zt_days) < P17_ZT_COUNT_MIN:
+        return None
+
+    # 2. 找主升段：连续涨停或强势上涨的高点
+    # 取涨停最密集的区间，高点 = 该区间最高价
+    # 简化：取回看期内最高点及其附近
+    high_idx = int(np.argmax(highs))
+    high_price = float(highs[high_idx])
+    # 主升起点：高点往前找，涨幅≥30%的起点
+    main_start = None
+    for i in range(high_idx, 0, -1):
+        if closes[i] <= 0:
+            continue
+        rally_zdf = (high_price / closes[i] - 1) * 100
+        if rally_zdf >= P17_MAIN_RALLY_ZDF_MIN:
+            main_start = i
+            break
+    if main_start is None:
+        return None
+    main_start_price = float(closes[main_start])
+
+    # 3. 调整期：从高点到当前
+    adjust_df = df.iloc[high_idx:]
+    adj_days = len(adjust_df)
+    if adj_days < P17_ADJUST_DAYS_MIN:
+        return None   # 调整时间不够
+
+    # 调整保持强势：最低价 ≥ 主升起点 × HOLD_PCT
+    adj_low = float(lows[high_idx:].min())
+    if adj_low < main_start_price * P17_ADJUST_HOLD_PCT:
+        return None
+
+    # 4. 调整末期企稳横盘：近 NARROW_DAYS 天振幅 < RANGE_PCT
+    narrow_df = df.iloc[-P17_NARROW_DAYS_MIN:]
+    narrow_high = float(narrow_df['high'].astype(float).max())
+    narrow_low = float(narrow_df['low'].astype(float).min())
+    if narrow_low <= 0:
+        return None
+    narrow_range = (narrow_high - narrow_low) / narrow_low * 100
+    if narrow_range > P17_ADJUST_RANGE_PCT:
+        return None
+
+    # 5. 当前放量启动：最后1-2日量比≥1.5 + 涨幅≥1%
+    vma5 = vols[-6:-1].mean() if n >= 6 else None
+    if not vma5 or vma5 <= 0:
+        return None
+    rec_vol_ratio = vols[-1] / vma5
+    rec_zdf = (closes[-1] / closes[-2] - 1) * 100
+    if rec_vol_ratio < P17_RECOVER_VOL_RATIO or rec_zdf < P17_RECOVER_ZDF_MIN:
+        return None
+
+    # 评分：涨停次数 + 调整天数 + 放量程度
+    pullback_pct = (high_price - closes[-1]) / high_price * 100
+    return {
+        'pattern': 'P17',
+        'name': '主升后调整企稳放量',
+        'zt_count': len(zt_days),
+        'high_date': df.iloc[high_idx]['date'],
+        'high_price': round(high_price, 2),
+        'main_start_price': round(main_start_price, 2),
+        'adjust_days': adj_days,
+        'pullback_pct': round(float(pullback_pct), 2),
+        'narrow_range': round(float(narrow_range), 2),
+        'recover_vol_ratio': round(float(rec_vol_ratio), 2),
+        'recover_zdf': round(float(rec_zdf), 2),
+        'score': 88 + len(zt_days) * 2 + adj_days * 0.2 + rec_vol_ratio * 3,
     }
 
 
@@ -1087,7 +1201,7 @@ def detect_P16(df):
 PATTERN_DETECTORS = [detect_P1, detect_P2, detect_P3, detect_P4, detect_P5,
                      detect_P6, detect_P7, detect_P8, detect_P9, detect_P10,
                      detect_P11, detect_P12, detect_P13, detect_P14,
-                     detect_P15, detect_P16]
+                     detect_P15, detect_P16, detect_P17]
 
 
 def scan_one(code, days=None):
