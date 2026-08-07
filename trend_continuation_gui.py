@@ -464,6 +464,21 @@ class MainWindow(QMainWindow):
         self.spin_days.setToolTip("K线回看天数（影响形态识别+显示）")
         ctrl_l.addWidget(self.spin_days)
 
+        ctrl_l.addWidget(QLabel("板块:"))
+        self.sector_filter = QComboBox()
+        self.sector_filter.setFixedHeight(30)
+        self.sector_filter.addItem("全部板块", "")
+        self.sector_filter.currentIndexChanged.connect(self._apply_sector_filter)
+        self._sector_box_ready = False
+        ctrl_l.addWidget(self.sector_filter)
+
+        ctrl_l.addWidget(QLabel("搜索:"))
+        self.filter_box = QLineEdit()
+        self.filter_box.setPlaceholderText("代码/名称/概念 实时筛选...")
+        self.filter_box.setFixedWidth(180)
+        self.filter_box.textChanged.connect(self._apply_sector_filter)
+        ctrl_l.addWidget(self.filter_box)
+
         self.scan_btn = QPushButton("扫描")
         self.scan_btn.setObjectName("scanBtn")
         self.scan_btn.clicked.connect(self.toggle_scan)
@@ -589,6 +604,7 @@ class MainWindow(QMainWindow):
     def on_result(self, results):
         self.results = results
         self.populate_table(results)
+        self._populate_sector_filter(results)
         pc = Counter()
         for r in results:
             for h in r['hits']:
@@ -671,6 +687,7 @@ class MainWindow(QMainWindow):
                 r['patterns'] = ','.join(sorted({h['pattern'] for h in r['hits']}))
             self.results = results
             self.populate_table(results)
+            self._populate_sector_filter(results)
             self.stat_label.setText(
                 f"已加载本地快照 | {len(results)} 只 | 保存于 {meta.get('saved_at','未知')}")
         except Exception as e:
@@ -726,6 +743,65 @@ class MainWindow(QMainWindow):
     def _apply_pattern_filter(self):
         if self.results:
             self.populate_table(self.results)
+            self._apply_sector_filter()   # 形态变化后重新应用板块+搜索筛选
+
+    # ---------- 板块筛选 ----------
+    def _populate_sector_filter(self, results):
+        """从扫描结果提取所有概念，按数量排序填入板块下拉"""
+        from collections import Counter
+        cnt = Counter()
+        for r in results:
+            concepts = r.get('concept_list', []) or []
+            if isinstance(concepts, str):
+                concepts = [c.strip() for c in concepts.split(';') if c.strip()]
+            for c in (concepts or []):
+                cnt[c] += 1
+        cur = self.sector_filter.currentData()
+        self.sector_filter.blockSignals(True)
+        self.sector_filter.clear()
+        self.sector_filter.addItem(f"全部板块 ({len(results)})", "")
+        for name, n in cnt.most_common():
+            self.sector_filter.addItem(f"{name} ({n})", name)
+        if cur:
+            idx = self.sector_filter.findData(cur)
+            if idx >= 0:
+                self.sector_filter.setCurrentIndex(idx)
+        self.sector_filter.blockSignals(False)
+        self._sector_box_ready = True
+
+    def _apply_sector_filter(self, *_):
+        """板块+搜索框 实时筛选（隐藏不匹配行）"""
+        sector = self.sector_filter.currentData() if self._sector_box_ready else ""
+        kw = self.filter_box.text().strip().lower()
+        shown = 0
+        for row in range(self.table.rowCount()):
+            match = True
+            # 板块筛选
+            if sector:
+                it = self.table.item(row, 0)
+                row_data = it.data(Qt.UserRole + 1) if it else None
+                concepts = (row_data or {}).get('concept_list', []) if row_data else []
+                if isinstance(concepts, str):
+                    concepts = [c.strip() for c in concepts.split(';') if c.strip()]
+                if sector not in (concepts or []):
+                    match = False
+            # 搜索框筛选（代码/名称/概念/行业）
+            if match and kw:
+                it = self.table.item(row, 0)
+                row_data = it.data(Qt.UserRole + 1) if it else None
+                if row_data:
+                    haystack = ' '.join(str(v) for v in [
+                        row_data.get('code', ''), row_data.get('name', ''),
+                        row_data.get('industry', ''), row_data.get('concept', ''),
+                        ','.join(row_data.get('concept_list', []) or [])
+                    ]).lower()
+                else:
+                    haystack = ''
+                match = kw in haystack
+            self.table.setRowHidden(row, not match)
+            if match:
+                shown += 1
+        self.stat_label.setText(f"显示 {shown} / 共 {len(self.results) if self.results else 0} 只")
 
     # ---------- 实时K线（选中行即显示）----------
     def _on_selection_changed(self):
