@@ -33,6 +33,15 @@ from trend_continuation_scanner import (
     KLINE_DAYS, MAX_WORKERS,
 )
 
+# 数值型表格Item（保证按数值排序而非字符串）
+class _NumItem(QTableWidgetItem):
+    def __lt__(self, other):
+        try:
+            return float(self.text()) < float(other.text())
+        except Exception:
+            return super().__lt__(other)
+
+
 # 形态中文名 + 颜色
 PATTERN_INFO = {
     'P1': ('放量涨后缩量回调', '#4ade80'),
@@ -476,15 +485,16 @@ class MainWindow(QMainWindow):
         # ---- splitter: 表格 + K线 ----
         self.splitter = QSplitter(Qt.Vertical)
         # 表格
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
-            ["代码", "名称", "现价", "涨跌%", "命中形态", "评分", "行业", "概念", "形态详情"])
+            ["代码", "名称", "现价", "涨跌%", "命中形态", "评分", "评分依据", "行业", "概念", "形态详情"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 70); self.table.setColumnWidth(1, 90)
         self.table.setColumnWidth(2, 70); self.table.setColumnWidth(3, 70)
-        self.table.setColumnWidth(4, 130); self.table.setColumnWidth(5, 60)
-        self.table.setColumnWidth(6, 100); self.table.setColumnWidth(7, 200)
+        self.table.setColumnWidth(4, 110); self.table.setColumnWidth(5, 55)
+        self.table.setColumnWidth(6, 180); self.table.setColumnWidth(7, 90)
+        self.table.setColumnWidth(8, 180)
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.splitter.addWidget(self.table)
@@ -675,9 +685,13 @@ class MainWindow(QMainWindow):
         for row, r in enumerate(filtered):
             self._set_item(row, 0, r['code'])
             self._set_item(row, 1, r['name'])
-            self._set_item(row, 2, f"{r['close']:.2f}", align=Qt.AlignRight)
+            # 现价：数值排序
+            close_item = _NumItem(f"{r['close']:.2f}")
+            close_item.setTextAlignment(Qt.AlignRight)
+            self.table.setItem(row, 2, close_item)
+            # 涨跌%：数值排序
             zdf = r['zdf']
-            zdf_item = QTableWidgetItem(f"{zdf:+.2f}")
+            zdf_item = _NumItem(f"{zdf:+.2f}")
             zdf_item.setForeground(QColor('#ef4444') if zdf > 0 else QColor('#22c55e'))
             zdf_item.setTextAlignment(Qt.AlignRight)
             self.table.setItem(row, 3, zdf_item)
@@ -685,15 +699,19 @@ class MainWindow(QMainWindow):
             color = QColor(PATTERN_INFO[r['patterns'].split(',')[0]][1]) if r['patterns'] else QColor('#94a3b8')
             pat_item.setForeground(color)
             self.table.setItem(row, 4, pat_item)
-            score_item = QTableWidgetItem(f"{r['best_score']:.1f}")
+            # 评分：数值排序
+            score_item = _NumItem(f"{r['best_score']:.1f}")
             score_item.setTextAlignment(Qt.AlignRight)
             self.table.setItem(row, 5, score_item)
-            self._set_item(row, 6, r.get('industry', ''))
-            self._set_item(row, 7, r.get('concept', '')[:40])
+            # 评分依据：列出各形态评分构成
+            score_basis = " + ".join(f"{h['pattern']}:{h['score']:.0f}" for h in r['hits'])
+            self._set_item(row, 6, score_basis)
+            self._set_item(row, 7, r.get('industry', ''))
+            self._set_item(row, 8, r.get('concept', '')[:40])
             detail = " | ".join(f"{PATTERN_INFO[h['pattern']][0]}" for h in r['hits'])
-            self._set_item(row, 8, detail)
+            self._set_item(row, 9, detail)
             # 存 row_data 供 K线刷新
-            for col in range(9):
+            for col in range(10):
                 it = self.table.item(row, col)
                 if it:
                     it.setData(Qt.UserRole + 1, r)
