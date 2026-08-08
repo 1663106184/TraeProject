@@ -467,10 +467,12 @@ class MainWindow(QMainWindow):
         ctrl_l.addWidget(QLabel("板块:"))
         self.sector_filter = QComboBox()
         self.sector_filter.setFixedHeight(30)
+        self.sector_filter.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sector_filter.setMinimumContentsLength(18)   # 按内容自适应宽度
         self.sector_filter.addItem("全部板块", "")
         self.sector_filter.currentIndexChanged.connect(self._apply_sector_filter)
         self._sector_box_ready = False
-        ctrl_l.addWidget(self.sector_filter)
+        ctrl_l.addWidget(self.sector_filter, 2)   # stretch=2 让它占更多空间
 
         ctrl_l.addWidget(QLabel("搜索:"))
         self.filter_box = QLineEdit()
