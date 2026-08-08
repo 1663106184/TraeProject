@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from stock_full_scan import get_kline_data, get_stock_raw, get_stock_industry
+import stock_chip_filter as scf
 from trend_continuation_scanner import (
     scan_market, scan_one, PATTERN_DETECTORS,
     KLINE_DAYS, MAX_WORKERS,
@@ -102,8 +103,8 @@ class ScanThread(QThread):
 # ============ K线异步加载线程 ============
 class KlineLoadThread(QThread):
     """子线程加载K线数据，避免主线程网络请求阻塞/崩溃"""
-    loaded = pyqtSignal(str, object, list, str)   # code, df, hits, info
-    failed = pyqtSignal(str, str)                  # code, error
+    loaded = pyqtSignal(str, object, list, str, object)   # code, df, hits, info, chip_info
+    failed = pyqtSignal(str, str)                          # code, error
 
     def __init__(self, code, hits, info, days=120):
         super().__init__()
@@ -118,7 +119,21 @@ class KlineLoadThread(QThread):
             if df is None or len(df) < 2:
                 self.failed.emit(self.code, 'K线数据不足')
                 return
-            self.loaded.emit(self.code, df, self.hits, self.info)
+            # 计算筹码分布
+            chip_info = None
+            try:
+                res = scf.build_chip_distribution(df, bins=scf.PRICE_BINS)
+                if res is not None:
+                    centers, chip, total = res
+                    cur = float(df['close'].astype(float).iloc[-1])
+                    above = centers > cur
+                    trapped = float(chip[above].sum()) / total
+                    profit = 1.0 - trapped
+                    peak = float(centers[int(np.argmax(chip))])
+                    chip_info = (profit, trapped, peak, centers, chip, total)
+            except Exception:
+                pass
+            self.loaded.emit(self.code, df, self.hits, self.info, chip_info)
         except Exception as e:
             self.failed.emit(self.code, str(e))
 
@@ -134,12 +149,14 @@ class KlineCanvas(QFrame):
         self._df = None
         self._hits = []
         self._info = ""
+        self._chip_info = None   # 筹码分布 (profit, trapped, peak, centers, chip, total)
         self.show_flags = {'ma': True, 'boll': False, 'macd': False, 'kdj': False, 'rsi': False}
 
-    def set_data(self, df, hits, info):
+    def set_data(self, df, hits, info, chip_info=None):
         self._df = df
         self._hits = hits or []
         self._info = info or ""
+        self._chip_info = chip_info
         self.update()
 
     def _y_of(self, val, pmin, pmax, price_h, pad_top=0):
@@ -205,7 +222,15 @@ class KlineCanvas(QFrame):
         df = self._df
         n = len(df)
         x_offset = 20
-        kw = w - 40  # 画图宽度
+        # 有筹码分布时，主图占左70%，右侧30%给筹码
+        has_chip = self._chip_info is not None
+        if has_chip:
+            kw = int((w - 30) * 0.70) - x_offset   # 主图宽度
+            chip_x = x_offset + kw + 20
+            chip_w = w - chip_x - 10
+        else:
+            kw = w - 40
+            chip_x = chip_w = 0
 
         # 确定副图数量
         sub_indicators = [k for k in ('macd', 'kdj', 'rsi') if self.show_flags.get(k, False)]
@@ -393,6 +418,42 @@ class KlineCanvas(QFrame):
             p.setPen(QColor('#fbbf24'))
             f2 = QFont(); f2.setPointSize(9); f2.setBold(True); p.setFont(f2)
             p.drawText(w - 200, 18, f"形态: {tags}")
+
+        # ---------- 筹码分布侧栏 ----------
+        if has_chip and chip_w > 30:
+            profit, trapped, peak, centers, chip, total = self._chip_info
+            p.setPen(QColor('#cfd6e4'))
+            p.drawText(chip_x, 18, "筹码分布")
+            cmax = float(chip.max()) if len(chip) else 1
+            if cmax <= 0:
+                cmax = 1
+            bar_h = max(1, price_h / len(chip))
+            p.setPen(Qt.NoPen)
+            cur_close = float(df['close'].iloc[-1])
+            for i, cv in enumerate(chip):
+                if cv <= 0:
+                    continue
+                # 筹码条 y 坐标与主图价格对应
+                price_at = float(centers[i])
+                y = self._y_of(price_at, pmin, pmax, price_h, pad_top)
+                bw = int(cv / cmax * (chip_w - 10))
+                col = QColor('#22c55e') if price_at > cur_close else QColor('#ef4444')
+                p.setBrush(QBrush(col))
+                p.drawRect(QRectF(chip_x, y, bw, max(1, bar_h - 1)))
+            # 筹码峰线
+            p.setPen(QPen(QColor('#fbbf24'), 1, Qt.DashLine))
+            peak_y = self._y_of(peak, pmin, pmax, price_h, pad_top)
+            p.drawLine(chip_x - 5, peak_y, chip_x + chip_w, peak_y)
+            p.setPen(QColor('#fbbf24'))
+            p.drawText(chip_x, peak_y - 4, f"峰 {peak:.2f}")
+            # 现价线（横贯主图）
+            cur_y = self._y_of(cur_close, pmin, pmax, price_h, pad_top)
+            p.setPen(QPen(QColor('#ffffff'), 1, Qt.DashLine))
+            p.drawLine(x_offset, cur_y, x_offset + kw, cur_y)
+            # 获利/套牢比例
+            p.setPen(QColor('#cfd6e4'))
+            p.drawText(chip_x, pad_top + price_h + 18, f"获利 {profit*100:.1f}%")
+            p.drawText(chip_x, pad_top + price_h + 36, f"套牢 {trapped*100:.1f}%")
 
 
 # ============ 主窗 ============
@@ -835,9 +896,9 @@ class MainWindow(QMainWindow):
         self._kline_loader.failed.connect(self._on_kline_failed)
         self._kline_loader.start()
 
-    def _on_kline_loaded(self, code, df, hits, info):
+    def _on_kline_loaded(self, code, df, hits, info, chip_info):
         self.kline_info.setText(info)
-        self.kline_canvas.set_data(df, hits, info)
+        self.kline_canvas.set_data(df, hits, info, chip_info)
 
     def _on_indicator_toggled(self):
         """指标勾选变化 -> 更新画布 show_flags 并重绘"""
